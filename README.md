@@ -1,0 +1,1 @@
+I'm still learning wgpu with bevy, feel free to correct me xD.

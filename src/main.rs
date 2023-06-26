@@ -45,7 +45,7 @@ pub struct StagingBuffer {
 }
 
 impl GlobalStorage {
-
+    #[inline]
     fn unmap_staging_buffers(&mut self) -> &mut Self {
         for (_, staging_buffer) in self.stage_buffers.iter_mut() {
             if staging_buffer.mapped {
@@ -65,7 +65,7 @@ impl GlobalStorage {
                 let err = result.err();
                 if err.is_some() {
                     let some_err = err.unwrap();
-                    //panic!("{}", some_err.to_string());
+                    // panic!("{}", some_err.to_string());
                 }
             });
 

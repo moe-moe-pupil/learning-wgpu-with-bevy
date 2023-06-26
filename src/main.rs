@@ -1,6 +1,6 @@
 use bevy::{
     core::Pod,
-    diagnostic::{Diagnostics, FrameTimeDiagnosticsPlugin},
+    diagnostic::{FrameTimeDiagnosticsPlugin, DiagnosticsStore},
     prelude::*,
     render::{
         extract_resource::{ExtractResource, ExtractResourcePlugin},
@@ -14,7 +14,7 @@ use bevy::{
     utils::HashMap,
     window::{close_on_esc, WindowMode, WindowPlugin},
 };
-use bytemuck::{cast_slice, AnyBitPattern, Zeroable};
+use bytemuck::{cast_slice, Zeroable};
 use line_drawing;
 use std::{borrow::Cow, println};
 use wgpu::MaintainBase;
@@ -62,11 +62,7 @@ impl GlobalStorage {
             let read_buffer_slice = staging_buffer.buffer.slice(..);
 
             read_buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
-                let err = result.err();
-                if err.is_some() {
-                    let some_err = err.unwrap();
-                    // panic!("{}", some_err.to_string());
-                }
+                    println!("{:?}", result);
             });
 
             staging_buffer.mapped = true;
@@ -306,7 +302,7 @@ fn copy_buffer(
         .buffer;
     encoder.copy_buffer_to_buffer(matter_src, 0, matter_dst, 0, matter_dst.size());
     queue.submit(Some(encoder.finish()));
-    device.poll(MaintainBase::Wait);
+    device.wgpu_device().poll(MaintainBase::Wait);
 }
 
 fn unmap_all(mut global_storage: ResMut<GlobalStorage>) {
@@ -506,7 +502,7 @@ impl render_graph::Node for PixelSimulationNode {
 #[derive(Component)]
 struct FpsText;
 
-fn text_update_system(diagnostics: Res<Diagnostics>, mut query: Query<&mut Text, With<FpsText>>) {
+fn text_update_system(diagnostics: Res<DiagnosticsStore>, mut query: Query<&mut Text, With<FpsText>>) {
     for mut text in &mut query {
         if let Some(fps) = diagnostics.get(FrameTimeDiagnosticsPlugin::FPS) {
             if let Some(value) = fps.smoothed() {

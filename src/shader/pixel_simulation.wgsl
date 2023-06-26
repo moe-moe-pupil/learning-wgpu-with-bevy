@@ -40,10 +40,10 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let total_matters = arrayLength(&matter_src);
     let index = global_id.x + global_id.y * u32(512);
 
-    // var vPos = matter_src[index].pos;
-    // var vColor = matter_src[index].color;
-    // matter_dst[index].pos = vPos;
-    // matter_dst[index].color = vColor;
+    var vPos = matter_src[index].pos;
+    var vColor = matter_src[index].color;
+    matter_dst[index].pos = vPos;
+    matter_dst[index].color = vColor;
 
     storageBarrier();
     let location = vec2<i32>(i32(global_id.x), i32(global_id.y));

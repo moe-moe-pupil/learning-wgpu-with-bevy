@@ -8,7 +8,7 @@ use bevy::{
         render_graph::{self, RenderGraph},
         render_resource::encase::StorageBuffer,
         render_resource::{encase::private::WriteInto, *},
-        renderer::{RenderContext, RenderDevice},
+        renderer::{RenderContext, RenderDevice, RenderQueue},
         Render, RenderApp, RenderSet,
     },
     utils::HashMap,
@@ -17,10 +17,11 @@ use bevy::{
 use bytemuck::{cast_slice, AnyBitPattern, Zeroable};
 use line_drawing;
 use std::{borrow::Cow, println};
+use wgpu::MaintainBase;
 
 const SIZE: (f32, f32) = (512.0, 512.0);
-const WORKGROUP_SIZE: u32 = 4;
-const NUM_MATTERS: u32 = ((SIZE.0 * SIZE.1) / WORKGROUP_SIZE as f32) as u32;
+
+const NUM_MATTERS: u32 = (SIZE.0 * SIZE.1) as u32;
 
 /// Converts cursor position to world coordinates.
 /// Convert mouse pos to be origo centered. Then scale it with camera scale, lastly offset
@@ -34,10 +35,45 @@ pub fn cursor_to_world(window: &Window, camera_pos: Vec2, camera_scale: f32) -> 
 #[derive(Resource, Clone, ExtractResource)]
 pub struct GlobalStorage {
     buffers: HashMap<String, Buffer>,
-    stage_buffers: HashMap<String, Buffer>,
+    stage_buffers: HashMap<String, StagingBuffer>,
+}
+
+#[derive(Clone, Debug)]
+pub struct StagingBuffer {
+    mapped: bool,
+    buffer: Buffer,
 }
 
 impl GlobalStorage {
+
+    fn unmap_staging_buffers(&mut self) -> &mut Self {
+        for (_, staging_buffer) in self.stage_buffers.iter_mut() {
+            if staging_buffer.mapped {
+                staging_buffer.buffer.unmap();
+                staging_buffer.mapped = false;
+            }
+        }
+        self
+    }
+
+    #[inline]
+    fn map_staging_buffers(&mut self) -> &mut Self {
+        for (_, staging_buffer) in self.stage_buffers.iter_mut() {
+            let read_buffer_slice = staging_buffer.buffer.slice(..);
+
+            read_buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
+                let err = result.err();
+                if err.is_some() {
+                    let some_err = err.unwrap();
+                    //panic!("{}", some_err.to_string());
+                }
+            });
+
+            staging_buffer.mapped = true;
+        }
+        self
+    }
+
     #[inline]
     fn add_buffer<T: ShaderType + WriteInto>(
         &mut self,
@@ -47,31 +83,27 @@ impl GlobalStorage {
     ) {
         let mut buffer = StorageBuffer::new(Vec::new());
         buffer.write::<T>(storage).unwrap();
-        let unmapped_buffer = render_device.create_buffer_with_data(&BufferInitDescriptor {
+        let storage_buffer = render_device.create_buffer_with_data(&BufferInitDescriptor {
             label: Some(name),
             contents: buffer.as_ref(),
             usage: BufferUsages::COPY_DST | BufferUsages::COPY_SRC | BufferUsages::STORAGE,
         });
 
-        // unmapped_buffer
-        //     .slice(..)
-        //     .map_async(wgpu::MapMode::Read, move |result| {
-        //         let err = result.err();
-        //         if err.is_some() {
-        //             let some_err = err.unwrap();
-        //             println!("{}", some_err.to_string());
-        //         }
-        //     });
-
-        let mapped_buffer = render_device.create_buffer(&BufferDescriptor {
+        let stage_buffer = render_device.create_buffer(&BufferDescriptor {
             label: Some(name),
-            size: unmapped_buffer.size(),
+            size: storage_buffer.size(),
             usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
-            mapped_at_creation: true,
+            mapped_at_creation: false,
         });
 
-        self.stage_buffers.insert(name.to_owned(), mapped_buffer);
-        self.buffers.insert(name.to_owned(), unmapped_buffer);
+        self.stage_buffers.insert(
+            name.to_owned(),
+            StagingBuffer {
+                buffer: stage_buffer,
+                mapped: false,
+            },
+        );
+        self.buffers.insert(name.to_owned(), storage_buffer);
     }
 }
 
@@ -136,6 +168,7 @@ fn main() {
         .add_systems(Update, close_on_esc)
         .add_systems(Update, text_update_system)
         .add_systems(Startup, setup)
+        .add_systems(Update, (unmap_all, copy_buffer, map_all).chain())
         .add_systems(Update, on_click_compute)
         .add_plugin(PixelSimulationComputePlugin)
         .run();
@@ -232,7 +265,7 @@ impl Plugin for PixelSimulationComputePlugin {
         // Extract the game of life image resource from the main world into the render world
         // for operation on by the compute shader and display on the sprite.
         app.add_plugin(ExtractResourcePlugin::<PixelSimulationImage>::default());
-        app.add_plugin(ExtractResourcePlugin::<GlobalStorage>::);
+        app.add_plugin(ExtractResourcePlugin::<GlobalStorage>::default());
         let render_app = app.sub_app_mut(RenderApp);
         render_app.add_systems(Render, queue_bind_group.in_set(RenderSet::Queue));
 
@@ -259,22 +292,42 @@ struct PixelSimulationBuffer(Buffer);
 #[derive(Resource)]
 struct PixelSimulationBindGroup(BindGroup);
 
+fn copy_buffer(
+    global_storage: Res<GlobalStorage>,
+    device: Res<RenderDevice>,
+    queue: Res<RenderQueue>,
+) {
+    let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor { label: None });
+    let matter_src = global_storage.buffers.get("matter_src").unwrap();
+    let matter_dst = &global_storage
+        .stage_buffers
+        .get("matter_dst")
+        .unwrap()
+        .buffer;
+    encoder.copy_buffer_to_buffer(matter_src, 0, matter_dst, 0, matter_dst.size());
+    queue.submit(Some(encoder.finish()));
+    device.poll(MaintainBase::Wait);
+}
+
+fn unmap_all(mut global_storage: ResMut<GlobalStorage>) {
+    global_storage.unmap_staging_buffers();
+}
+
+fn map_all(mut global_storage: ResMut<GlobalStorage>) {
+    global_storage.map_staging_buffers();
+}
+
 fn on_click_compute(buttons: Res<Input<MouseButton>>, global_storage: Res<GlobalStorage>) {
     if buttons.just_pressed(MouseButton::Right) {
-        let result = cast_slice::<u8, Matter>(
-            &global_storage
-                .stage_buffers
-                .get("matter_dst")
-                .unwrap()
-                .slice(..)
-                .get_mapped_range(),
-        )
-        .to_vec();
-        result.iter().for_each(|m| {
-            println!("{:?}", m);
-        });
+        let matter_dst = &global_storage.stage_buffers.get("matter_dst").unwrap();
+        if matter_dst.mapped {
+            let result =
+                cast_slice::<u8, Matter>(&matter_dst.buffer.slice(..).get_mapped_range()).to_vec();
+            result.iter().for_each(|m| {
+                println!("{:?}", m);
+            });
+        }
     }
-
     if buttons.just_pressed(MouseButton::Left) {}
 }
 
@@ -442,11 +495,7 @@ impl render_graph::Node for PixelSimulationNode {
                     .get_compute_pipeline(pipeline.main_pipeline)
                     .unwrap();
                 pass.set_pipeline(init_pipeline);
-                pass.dispatch_workgroups(
-                    SIZE.0 as u32 / WORKGROUP_SIZE,
-                    SIZE.1 as u32 / WORKGROUP_SIZE,
-                    1,
-                );
+                pass.dispatch_workgroups(SIZE.0 as u32, SIZE.1 as u32, 1);
             }
         }
 

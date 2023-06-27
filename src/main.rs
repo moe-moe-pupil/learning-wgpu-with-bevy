@@ -1,6 +1,6 @@
 use bevy::{
     core::Pod,
-    diagnostic::{FrameTimeDiagnosticsPlugin, DiagnosticsStore},
+    diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin},
     prelude::*,
     render::{
         extract_resource::{ExtractResource, ExtractResourcePlugin},
@@ -17,7 +17,6 @@ use bevy::{
 use bytemuck::{cast_slice, Zeroable};
 use line_drawing;
 use std::{borrow::Cow, println};
-use wgpu::MaintainBase;
 
 const SIZE: (f32, f32) = (512.0, 512.0);
 
@@ -38,10 +37,44 @@ pub struct GlobalStorage {
     stage_buffers: HashMap<String, StagingBuffer>,
 }
 
+#[derive(Resource)]
+pub struct RenderContextStorage {
+    encoder: Option<CommandEncoder>,
+    queue: RenderQueue,
+    device: RenderDevice,
+}
+
 #[derive(Clone, Debug)]
 pub struct StagingBuffer {
     mapped: bool,
     buffer: Buffer,
+}
+
+impl RenderContextStorage {
+    fn submit(&mut self) -> &mut Self {
+        let encoder = self.encoder.take().unwrap();
+        self.queue.submit(Some(encoder.finish()));
+        self
+    }
+
+    fn copy_buffer(&mut self, src: &Buffer, dst: &Buffer, size: u64) -> &mut Self {
+        match self.encoder.as_mut() {
+            None => {
+                self.encoder = Some(
+                    self.device
+                        .create_command_encoder(&CommandEncoderDescriptor { label: None }),
+                );
+                self.encoder
+                    .as_mut()
+                    .unwrap()
+                    .copy_buffer_to_buffer(src, 0, dst, 0, size);
+            }
+            Some(encoder) => {
+                encoder.copy_buffer_to_buffer(src, 0, dst, 0, size);
+            }
+        }
+        self
+    }
 }
 
 impl GlobalStorage {
@@ -62,7 +95,12 @@ impl GlobalStorage {
             let read_buffer_slice = staging_buffer.buffer.slice(..);
 
             read_buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
-                    println!("{:?}", result);
+                let err = result.err();
+                if err.is_some() {
+                    let some_err = err.unwrap();
+                    panic!("{}", some_err.to_string());
+                }
+                println!("OK");
             });
 
             staging_buffer.mapped = true;
@@ -116,6 +154,10 @@ struct Matter {
     vel: Vec2,
 }
 
+fn is_poll(device: &Res<RenderDevice>) -> bool {
+    device.wgpu_device().poll(wgpu::MaintainBase::Wait)
+}
+
 impl MousePos {
     pub fn new(pos: Vec2) -> MousePos {
         MousePos { world: pos }
@@ -160,13 +202,17 @@ fn main() {
             }),
             ..default()
         }))
-        .add_plugin(FrameTimeDiagnosticsPlugin::default())
+        .add_plugins((
+            FrameTimeDiagnosticsPlugin::default(),
+            PixelSimulationComputePlugin,
+        ))
         .add_systems(Update, close_on_esc)
         .add_systems(Update, text_update_system)
         .add_systems(Startup, setup)
-        .add_systems(Update, (unmap_all, copy_buffer, map_all).chain())
-        .add_systems(Update, on_click_compute)
-        .add_plugin(PixelSimulationComputePlugin)
+        .add_systems(
+            Update,
+            (unmap_all, copy_buffer, submit, map_all, on_click_compute).chain(),
+        )
         .run();
 }
 
@@ -175,6 +221,7 @@ fn setup(
     mut images: ResMut<Assets<Image>>,
     asset_server: Res<AssetServer>,
     render_device: Res<RenderDevice>,
+    render_queue: Res<RenderQueue>,
 ) {
     let mut image = Image::new_fill(
         Extent3d {
@@ -251,6 +298,13 @@ fn setup(
     };
     new_storage.add_buffer("matter_src", &initial_matter_data, render_device.as_ref());
     new_storage.add_buffer("matter_dst", &initial_matter_data, render_device.as_ref());
+    commands.insert_resource(RenderContextStorage {
+        encoder: Some(
+            render_device.create_command_encoder(&CommandEncoderDescriptor { label: None }),
+        ),
+        queue: render_queue.clone(),
+        device: render_device.clone(),
+    });
     commands.insert_resource(new_storage);
 }
 
@@ -260,8 +314,10 @@ impl Plugin for PixelSimulationComputePlugin {
     fn build(&self, app: &mut App) {
         // Extract the game of life image resource from the main world into the render world
         // for operation on by the compute shader and display on the sprite.
-        app.add_plugin(ExtractResourcePlugin::<PixelSimulationImage>::default());
-        app.add_plugin(ExtractResourcePlugin::<GlobalStorage>::default());
+        app.add_plugins((
+            ExtractResourcePlugin::<PixelSimulationImage>::default(),
+            ExtractResourcePlugin::<GlobalStorage>::default(),
+        ));
         let render_app = app.sub_app_mut(RenderApp);
         render_app.add_systems(Render, queue_bind_group.in_set(RenderSet::Queue));
 
@@ -292,39 +348,60 @@ fn copy_buffer(
     global_storage: Res<GlobalStorage>,
     device: Res<RenderDevice>,
     queue: Res<RenderQueue>,
+    mut render_storage: ResMut<RenderContextStorage>,
 ) {
-    let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor { label: None });
-    let matter_src = global_storage.buffers.get("matter_src").unwrap();
-    let matter_dst = &global_storage
-        .stage_buffers
-        .get("matter_dst")
-        .unwrap()
-        .buffer;
-    encoder.copy_buffer_to_buffer(matter_src, 0, matter_dst, 0, matter_dst.size());
-    queue.submit(Some(encoder.finish()));
-    device.wgpu_device().poll(MaintainBase::Wait);
-}
-
-fn unmap_all(mut global_storage: ResMut<GlobalStorage>) {
-    global_storage.unmap_staging_buffers();
-}
-
-fn map_all(mut global_storage: ResMut<GlobalStorage>) {
-    global_storage.map_staging_buffers();
-}
-
-fn on_click_compute(buttons: Res<Input<MouseButton>>, global_storage: Res<GlobalStorage>) {
-    if buttons.just_pressed(MouseButton::Right) {
-        let matter_dst = &global_storage.stage_buffers.get("matter_dst").unwrap();
-        if matter_dst.mapped {
-            let result =
-                cast_slice::<u8, Matter>(&matter_dst.buffer.slice(..).get_mapped_range()).to_vec();
-            result.iter().for_each(|m| {
-                println!("{:?}", m);
-            });
-        }
+    if is_poll(&device) {
+        let matter_src = global_storage.buffers.get("matter_src").unwrap();
+        let matter_dst = &global_storage
+            .stage_buffers
+            .get("matter_dst")
+            .unwrap()
+            .buffer;
+        render_storage.copy_buffer(matter_src, matter_dst, matter_dst.size());
     }
-    if buttons.just_pressed(MouseButton::Left) {}
+}
+
+fn submit(
+    mut render_storage: ResMut<RenderContextStorage>,
+    queue: Res<RenderQueue>,
+    device: Res<RenderDevice>,
+) {
+    if is_poll(&device) {
+        render_storage.submit();
+    }
+}
+
+fn unmap_all(mut global_storage: ResMut<GlobalStorage>, device: Res<RenderDevice>) {
+    if is_poll(&device) {
+        global_storage.unmap_staging_buffers();
+    }
+}
+
+fn map_all(mut global_storage: ResMut<GlobalStorage>, device: Res<RenderDevice>) {
+    if is_poll(&device) {
+        global_storage.map_staging_buffers();
+    }
+}
+
+fn on_click_compute(
+    buttons: Res<Input<MouseButton>>,
+    global_storage: Res<GlobalStorage>,
+    device: Res<RenderDevice>,
+) {
+    if is_poll(&device) {
+        if buttons.just_pressed(MouseButton::Right) {
+            let matter_dst = global_storage.stage_buffers.get("matter_dst").unwrap();
+            if matter_dst.mapped {
+                let result =
+                    cast_slice::<u8, Matter>(&matter_dst.buffer.slice(..).get_mapped_range())
+                        .to_vec();
+                result.iter().for_each(|m| {
+                    println!("{:?}", m);
+                });
+            }
+        }
+        if buttons.just_pressed(MouseButton::Left) {}
+    }
 }
 
 fn queue_bind_group(
@@ -502,7 +579,10 @@ impl render_graph::Node for PixelSimulationNode {
 #[derive(Component)]
 struct FpsText;
 
-fn text_update_system(diagnostics: Res<DiagnosticsStore>, mut query: Query<&mut Text, With<FpsText>>) {
+fn text_update_system(
+    diagnostics: Res<DiagnosticsStore>,
+    mut query: Query<&mut Text, With<FpsText>>,
+) {
     for mut text in &mut query {
         if let Some(fps) = diagnostics.get(FrameTimeDiagnosticsPlugin::FPS) {
             if let Some(value) = fps.smoothed() {

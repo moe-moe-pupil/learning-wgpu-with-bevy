@@ -100,7 +100,6 @@ impl GlobalStorage {
                     let some_err = err.unwrap();
                     panic!("{}", some_err.to_string());
                 }
-                println!("OK");
             });
 
             staging_buffer.mapped = true;
@@ -151,7 +150,7 @@ pub struct MousePos {
 #[repr(C)]
 struct Matter {
     pos: Vec2,
-    vel: Vec2,
+    color: UVec2,
 }
 
 fn is_poll(device: &Res<RenderDevice>) -> bool {
@@ -288,7 +287,7 @@ fn setup(
     for i in 0..NUM_MATTERS {
         initial_matter_data.push(Matter {
             pos: Vec2::new((i % SIZE.0 as u32) as f32, (i / SIZE.0 as u32) as f32),
-            vel: Vec2::new(0., 0.),
+            color: UVec2::new(0xffffffff, 0),
         });
     }
 
@@ -339,9 +338,6 @@ impl Plugin for PixelSimulationComputePlugin {
 struct PixelSimulationImage(Handle<Image>);
 
 #[derive(Resource)]
-struct PixelSimulationBuffer(Buffer);
-
-#[derive(Resource)]
 struct PixelSimulationBindGroup(BindGroup);
 
 fn copy_buffer(
@@ -351,7 +347,7 @@ fn copy_buffer(
     mut render_storage: ResMut<RenderContextStorage>,
 ) {
     if is_poll(&device) {
-        let matter_src = global_storage.buffers.get("matter_src").unwrap();
+        let matter_src = global_storage.buffers.get("matter_dst").unwrap();
         let matter_dst = &global_storage
             .stage_buffers
             .get("matter_dst")

@@ -12,7 +12,7 @@ use bevy::{
         Render, RenderApp, RenderSet,
     },
     utils::HashMap,
-    window::{close_on_esc, WindowMode, WindowPlugin},
+    window::{close_on_esc, PrimaryWindow, WindowMode, WindowPlugin},
 };
 use bytemuck::{cast_slice, Zeroable};
 use line_drawing;
@@ -138,6 +138,15 @@ impl GlobalStorage {
         );
         self.buffers.insert(name.to_owned(), storage_buffer);
     }
+
+    #[inline]
+    fn swap(&mut self) {
+        let [buffer_a, buffer_b] = self
+            .buffers
+            .get_many_mut(["matter_src", "matter_dst"])
+            .unwrap();
+        std::mem::swap(buffer_a, buffer_b);
+    }
 }
 
 /// Mouse world position
@@ -210,7 +219,15 @@ fn main() {
         .add_systems(Startup, setup)
         .add_systems(
             Update,
-            (unmap_all, copy_buffer, submit, map_all, on_click_compute).chain(),
+            (
+                unmap_all,
+                copy_buffer,
+                submit,
+                map_all,
+                on_click_compute,
+                swap,
+            )
+                .chain(),
         )
         .run();
 }
@@ -287,7 +304,7 @@ fn setup(
     for i in 0..NUM_MATTERS {
         initial_matter_data.push(Matter {
             pos: Vec2::new((i % SIZE.0 as u32) as f32, (i / SIZE.0 as u32) as f32),
-            color: UVec2::new(0xffffffff, 0),
+            color: UVec2::new(0x00000000, 0),
         });
     }
 
@@ -354,6 +371,14 @@ fn copy_buffer(
             .unwrap()
             .buffer;
         render_storage.copy_buffer(matter_src, matter_dst, matter_dst.size());
+
+        let matter_src = global_storage.buffers.get("matter_src").unwrap();
+        let matter_dst = &global_storage
+            .stage_buffers
+            .get("matter_src")
+            .unwrap()
+            .buffer;
+        render_storage.copy_buffer(matter_src, matter_dst, matter_dst.size());
     }
 }
 
@@ -364,6 +389,13 @@ fn submit(
 ) {
     if is_poll(&device) {
         render_storage.submit();
+    }
+}
+
+fn swap(mut global_storage: ResMut<GlobalStorage>, device: Res<RenderDevice>) {
+    if is_poll(&device) {
+        println!("start to swap");
+        global_storage.swap();
     }
 }
 
@@ -383,20 +415,45 @@ fn on_click_compute(
     buttons: Res<Input<MouseButton>>,
     global_storage: Res<GlobalStorage>,
     device: Res<RenderDevice>,
+    q_windows: Query<&Window, With<PrimaryWindow>>,
+    queue: Res<RenderQueue>,
 ) {
     if is_poll(&device) {
-        if buttons.just_pressed(MouseButton::Right) {
-            let matter_dst = global_storage.stage_buffers.get("matter_dst").unwrap();
-            if matter_dst.mapped {
-                let result =
-                    cast_slice::<u8, Matter>(&matter_dst.buffer.slice(..).get_mapped_range())
-                        .to_vec();
-                result.iter().for_each(|m| {
-                    println!("{:?}", m);
-                });
+        if let Some(position) = q_windows.single().cursor_position() {
+            if buttons.just_pressed(MouseButton::Right) {
+                let matter_dst = global_storage.stage_buffers.get("matter_dst").unwrap();
+                if matter_dst.mapped {
+                    let result =
+                        cast_slice::<u8, Matter>(&matter_dst.buffer.slice(..).get_mapped_range())
+                            .to_vec();
+                    result.iter().for_each(|m| {
+                        println!("{:?}", m);
+                    });
+                }
+            }
+            if buttons.pressed(MouseButton::Left) {
+                let matter_dst = global_storage.stage_buffers.get("matter_dst").unwrap();
+                if matter_dst.mapped {
+                    let mut result =
+                        cast_slice::<u8, Matter>(&matter_dst.buffer.slice(..).get_mapped_range())
+                            .to_vec();
+                    let index =
+                        (position.as_ivec2().x + position.as_ivec2().y * SIZE.0 as i32) as usize;
+                    result[index] = Matter {
+                        pos: result[index].pos,
+                        color: UVec2 {
+                            x: 0xffffffff,
+                            y: 0,
+                        },
+                    };
+                    queue.write_buffer(
+                        global_storage.buffers.get("matter_src").unwrap(),
+                        0,
+                        cast_slice(&result),
+                    );
+                }
             }
         }
-        if buttons.just_pressed(MouseButton::Left) {}
     }
 }
 

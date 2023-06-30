@@ -158,8 +158,7 @@ pub struct MousePos {
 #[derive(ShaderType, Pod, Zeroable, Clone, Copy, Debug)]
 #[repr(C)]
 struct Matter {
-    pos: Vec2,
-    color: UVec2,
+    color: u32,
 }
 
 fn is_poll(device: &Res<RenderDevice>) -> bool {
@@ -204,7 +203,7 @@ fn main() {
                 title: "Bevy".into(),
                 resolution: SIZE.into(),
                 resizable: false,
-                present_mode: bevy::window::PresentMode::Immediate,
+                present_mode: bevy::window::PresentMode::AutoNoVsync,
                 mode: WindowMode::Windowed,
                 ..default()
             }),
@@ -281,7 +280,7 @@ fn setup(
                 TextStyle {
                     font: font.clone(),
                     font_size: 40.0,
-                    color: Color::WHITE,
+                    color: Color::BEIGE,
                 },
             ),
         ])
@@ -303,8 +302,7 @@ fn setup(
     //FIXME use more readable code
     for i in 0..NUM_MATTERS {
         initial_matter_data.push(Matter {
-            pos: Vec2::new((i % SIZE.0 as u32) as f32, (i / SIZE.0 as u32) as f32),
-            color: UVec2::new(0x00000000, 0),
+            color: 0x00000000u32,
         });
     }
 
@@ -325,6 +323,10 @@ fn setup(
 }
 
 pub struct PixelSimulationComputePlugin;
+
+fn is_point_in_canvas(point: Vec2) -> bool {
+    point.x >= 0.0 && point.y >= 0.0 && point.x < SIZE.0 && point.y < SIZE.1
+}
 
 impl Plugin for PixelSimulationComputePlugin {
     fn build(&self, app: &mut App) {
@@ -394,7 +396,6 @@ fn submit(
 
 fn swap(mut global_storage: ResMut<GlobalStorage>, device: Res<RenderDevice>) {
     if is_poll(&device) {
-        println!("start to swap");
         global_storage.swap();
     }
 }
@@ -432,20 +433,26 @@ fn on_click_compute(
                 }
             }
             if buttons.pressed(MouseButton::Left) {
-                let matter_dst = global_storage.stage_buffers.get("matter_dst").unwrap();
+                let matter_dst = global_storage.stage_buffers.get("matter_src").unwrap();
+                let radius = 5;
                 if matter_dst.mapped {
                     let mut result =
                         cast_slice::<u8, Matter>(&matter_dst.buffer.slice(..).get_mapped_range())
                             .to_vec();
-                    let index =
-                        (position.as_ivec2().x + position.as_ivec2().y * SIZE.0 as i32) as usize;
-                    result[index] = Matter {
-                        pos: result[index].pos,
-                        color: UVec2 {
-                            x: 0xffffffff,
-                            y: 0,
-                        },
-                    };
+                    for x in position.as_ivec2().x - radius..=position.as_ivec2().x + radius {
+                        for y in position.as_ivec2().y - radius..=position.as_ivec2().y + radius {
+                            if is_point_in_canvas(Vec2 {
+                                x: x as f32,
+                                y: y as f32,
+                            }) {
+                                let index = (x + y * SIZE.0 as i32) as usize;
+                                result[index] = Matter {
+                                    color: 0xffffffffu32,
+                                };
+                            }
+                        }
+                    }
+
                     queue.write_buffer(
                         global_storage.buffers.get("matter_src").unwrap(),
                         0,
@@ -621,7 +628,7 @@ impl render_graph::Node for PixelSimulationNode {
                     .get_compute_pipeline(pipeline.main_pipeline)
                     .unwrap();
                 pass.set_pipeline(init_pipeline);
-                pass.dispatch_workgroups(SIZE.0 as u32, SIZE.1 as u32, 1);
+                pass.dispatch_workgroups(SIZE.0 as u32 / 16, SIZE.1 as u32 / 16, 1);
             }
         }
 

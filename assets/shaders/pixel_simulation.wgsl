@@ -1,10 +1,9 @@
-const canvas_size_x = 512.0;
-const canvas_size_y = 512.0;
-const empty_matter = 0x00000000;
+const canvas_size_x = 512u;
+const canvas_size_y = 512u;
+const empty_matter = 0x00000000u;
 
 struct Matter {
-    pos: vec2<f32>,
-    color: vec2<u32>,
+    color: u32,
 }
 
 @group(0) @binding(0)
@@ -35,65 +34,44 @@ fn linear_from_srgba(srgba: vec4<f32>) -> vec4<f32> {
     return vec4<f32>(linear_from_srgb(srgba.rgb * 255.0), srgba.a);
 }
 
-fn get_top_matter_color(pos: vec2<f32>) -> vec2<u32> {
-    let top_pos = vec2<f32>(pos.x, pos.y - 1.0);
-    let new_index = top_pos.x + top_pos.y * canvas_size_x;
-    if is_inside_canvas(top_pos) {
-        return matter_src[u32(new_index)].color;
+fn get_neighbors_index(index: i32, to: vec2<i32>) -> i32 {
+    return index + to.x + to.y * i32(canvas_size_x);
+}
+
+fn get_neighbors_color(index: i32, to: vec2<i32>) -> u32 {
+    let neighbor_index = get_neighbors_index(index, to);
+    if is_inside_canvas(neighbor_index) {
+        return matter_src[neighbor_index].color;
     } else {
-        return vec2<u32>(u32(empty_matter), u32(0));
+        return empty_matter;
     }
 }
 
-fn get_down_matter_color(pos: vec2<f32>) -> vec2<u32> {
-    let down_pos = vec2<f32>(pos.x, pos.y + 1.0);
-    let new_index = down_pos.x + down_pos.y * canvas_size_x;
-    if is_inside_canvas(down_pos) {
-        return matter_src[u32(new_index)].color;
-    } else {
-        return vec2<u32>(u32(empty_matter), u32(0));
-    }
+fn is_empty(index: i32) -> bool {
+    return matter_src[index].color == empty_matter;
 }
 
-fn is_empty(pos: vec2<f32>) -> bool {
-    let index = u32(pos.x + pos.y * canvas_size_x);
-    return matter_src[index].color.x == u32(empty_matter);
+fn is_inside_canvas(index: i32) -> bool {
+    return index >= 0 && index < i32(canvas_size_x * canvas_size_y);
 }
 
-fn is_inside_canvas(pos: vec2<f32>) -> bool {
-    return pos.x > 0.0 && pos.x < canvas_size_x && pos.y >= 0.0 && pos.y < canvas_size_y;
+fn get_neighbors(current_index: u32, to: vec2<u32>) {
 }
 
 @compute @workgroup_size(16, 16, 1)
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
-    let total_matters = arrayLength(&matter_src);
-    let index = global_id.x + global_id.y * u32(canvas_size_x);
+    let index = i32(global_id.x + global_id.y * canvas_size_x);
     let location = vec2<i32>(i32(global_id.x), i32(global_id.y));
-    var vPos = matter_src[index].pos;
-    let top_pos = vec2<f32>(vPos.x, vPos.y - 1.0);
-    let down_pos = vec2<f32>(vPos.x, vPos.y + 1.0);
-    matter_dst[index].pos = vPos;
 
-    if is_empty(vPos) {
-        var vColor = get_top_matter_color(matter_src[index].pos);
-        matter_dst[index].color = vColor;
+    if is_empty(index) {
+        matter_dst[index].color = get_neighbors_color(index, vec2<i32>(0, -1)) ;
     } else {
-        if !is_empty(down_pos) {
-            var vColor = matter_src[index].color;
-            matter_dst[index].color = vColor;
+        if !is_empty(get_neighbors_index(index, vec2<i32>(0, 1))) || global_id.y == canvas_size_y - 1u {
+            matter_dst[index].color = matter_src[index].color;
         } else {
-            if vPos.y == canvas_size_y - 1.0 {
-                var vColor = matter_src[index].color;
-                matter_dst[index].color = vColor;
-            } else {
-                var vColor = matter_src[index].color;
-                matter_dst[index].color.x = u32(empty_matter);
-            }
+            matter_dst[index].color = empty_matter;
         }
     }
-
-
-
     storageBarrier();
-    textureStore(texture, location, matter_color_to_vec4(matter_dst[index].color.x));
+    textureStore(texture, location, matter_color_to_vec4(matter_dst[index].color));
 }

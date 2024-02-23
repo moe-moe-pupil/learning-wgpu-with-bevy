@@ -4,10 +4,12 @@ use bevy::{
     prelude::*,
     render::{
         extract_resource::{ExtractResource, ExtractResourcePlugin},
-        render_asset::RenderAssets,
-        render_graph::{self, RenderGraph},
-        render_resource::encase::StorageBuffer,
-        render_resource::{encase::private::WriteInto, *},
+        render_asset::{RenderAssetUsages, RenderAssets},
+        render_graph::{self, RenderGraph, RenderLabel},
+        render_resource::{
+            encase::{private::WriteInto, StorageBuffer},
+            *,
+        },
         renderer::{RenderContext, RenderDevice, RenderQueue},
         Render, RenderApp, RenderSet,
     },
@@ -16,8 +18,9 @@ use bevy::{
 };
 use bytemuck::{cast_slice, Zeroable};
 use line_drawing;
-use std::{borrow::Cow, println};
-
+use std::{borrow::Cow, num::NonZeroU64, println};
+#[derive(Debug, Hash, PartialEq, Eq, Clone, RenderLabel)]
+pub struct PixelSimulationLabel;
 const SIZE: (f32, f32) = (512.0, 512.0);
 
 const NUM_MATTERS: u32 = (SIZE.0 * SIZE.1) as u32;
@@ -162,7 +165,10 @@ struct Matter {
 }
 
 fn is_poll(device: &Res<RenderDevice>) -> bool {
-    device.wgpu_device().poll(wgpu::MaintainBase::Wait)
+    device
+        .wgpu_device()
+        .poll(wgpu::MaintainBase::Wait)
+        .is_queue_empty()
 }
 
 impl MousePos {
@@ -223,8 +229,8 @@ fn main() {
                 copy_buffer,
                 submit,
                 map_all,
-                on_click_compute,
                 swap,
+                on_click_compute,
             )
                 .chain(),
         )
@@ -247,6 +253,7 @@ fn setup(
         TextureDimension::D2,
         &[0, 0, 0, 255],
         TextureFormat::Rgba8Unorm,
+        RenderAssetUsages::default(),
     );
     image.texture_descriptor.usage =
         TextureUsages::COPY_DST | TextureUsages::STORAGE_BINDING | TextureUsages::TEXTURE_BINDING;
@@ -262,9 +269,9 @@ fn setup(
     });
     commands.spawn(Camera2dBundle::default());
 
-    commands.insert_resource(PixelSimulationImage(image));
+    commands.insert_resource(PixelSimulationImage { texture: image });
 
-    let font = asset_server.load::<Font, _>("fonts/NotoSansTC-Medium.otf");
+    let font = asset_server.load::<Font>("fonts/NotoSansTC-Medium.otf");
     commands.spawn((
         TextBundle::from_sections([
             TextSection::new(
@@ -284,7 +291,7 @@ fn setup(
                 },
             ),
         ])
-        .with_text_alignment(TextAlignment::Left)
+        .with_text_justify(JustifyText::Left)
         .with_style(Style {
             position_type: PositionType::Absolute,
             margin: UiRect {
@@ -337,14 +344,14 @@ impl Plugin for PixelSimulationComputePlugin {
             ExtractResourcePlugin::<GlobalStorage>::default(),
         ));
         let render_app = app.sub_app_mut(RenderApp);
-        render_app.add_systems(Render, queue_bind_group.in_set(RenderSet::Queue));
+        render_app.add_systems(
+            Render,
+            queue_bind_group.in_set(RenderSet::PrepareBindGroups),
+        );
 
         let mut render_graph = render_app.world.resource_mut::<RenderGraph>();
-        render_graph.add_node("pixel_simulation", PixelSimulationNode::default());
-        render_graph.add_node_edge(
-            "pixel_simulation",
-            bevy::render::main_graph::node::CAMERA_DRIVER,
-        );
+        render_graph.add_node(PixelSimulationLabel, PixelSimulationNode::default());
+        render_graph.add_node_edge(PixelSimulationLabel, bevy::render::graph::CameraDriverLabel);
     }
 
     fn finish(&self, app: &mut App) {
@@ -353,8 +360,11 @@ impl Plugin for PixelSimulationComputePlugin {
     }
 }
 
-#[derive(Resource, Clone, Deref, ExtractResource)]
-struct PixelSimulationImage(Handle<Image>);
+#[derive(Resource, Clone, Deref, ExtractResource, AsBindGroup)]
+struct PixelSimulationImage {
+    #[storage_texture(0, image_format = Rgba8Unorm, access = ReadWrite)]
+    texture: Handle<Image>,
+}
 
 #[derive(Resource)]
 struct PixelSimulationBindGroup(BindGroup);
@@ -413,7 +423,7 @@ fn map_all(mut global_storage: ResMut<GlobalStorage>, device: Res<RenderDevice>)
 }
 
 fn on_click_compute(
-    buttons: Res<Input<MouseButton>>,
+    buttons: Res<ButtonInput<MouseButton>>,
     global_storage: Res<GlobalStorage>,
     device: Res<RenderDevice>,
     q_windows: Query<&Window, With<PrimaryWindow>>,
@@ -472,12 +482,12 @@ fn queue_bind_group(
     render_device: Res<RenderDevice>,
     storage: Res<GlobalStorage>,
 ) {
-    let view = &gpu_images[&pixel_simulation_image.0];
+    let view = &gpu_images.get(&pixel_simulation_image.texture).unwrap();
 
-    let bind_group = render_device.create_bind_group(&BindGroupDescriptor {
-        label: None,
-        layout: &pipeline.texture_bind_group_layout,
-        entries: &[
+    let bind_group = render_device.create_bind_group(
+        None,
+        &pipeline.texture_bind_group_layout,
+        &[
             BindGroupEntry {
                 binding: 0,
                 resource: BindingResource::TextureView(&view.texture_view),
@@ -499,7 +509,7 @@ fn queue_bind_group(
                     .as_entire_binding(),
             },
         ],
-    });
+    );
     commands.insert_resource(PixelSimulationBindGroup(bind_group));
 }
 
@@ -511,44 +521,41 @@ pub struct PixelSimulationPipeline {
 
 impl FromWorld for PixelSimulationPipeline {
     fn from_world(world: &mut World) -> Self {
-        let texture_bind_group_layout =
-            world
-                .resource::<RenderDevice>()
-                .create_bind_group_layout(&BindGroupLayoutDescriptor {
-                    label: None,
-                    entries: &[
-                        BindGroupLayoutEntry {
-                            binding: 0,
-                            visibility: ShaderStages::COMPUTE,
-                            ty: BindingType::StorageTexture {
-                                access: StorageTextureAccess::ReadWrite,
-                                format: TextureFormat::Rgba8Unorm,
-                                view_dimension: TextureViewDimension::D2,
-                            },
-                            count: None,
-                        },
-                        BindGroupLayoutEntry {
-                            binding: 1,
-                            visibility: ShaderStages::COMPUTE,
-                            ty: BindingType::Buffer {
-                                ty: BufferBindingType::Storage { read_only: true },
-                                has_dynamic_offset: false,
-                                min_binding_size: Some(Matter::min_size()),
-                            },
-                            count: None,
-                        },
-                        BindGroupLayoutEntry {
-                            binding: 2,
-                            visibility: ShaderStages::COMPUTE,
-                            ty: BindingType::Buffer {
-                                ty: BufferBindingType::Storage { read_only: false },
-                                has_dynamic_offset: false,
-                                min_binding_size: Some(Matter::min_size()),
-                            },
-                            count: None,
-                        },
-                    ],
-                });
+        let texture_bind_group_layout = world.resource::<RenderDevice>().create_bind_group_layout(
+            None,
+            &[
+                BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::StorageTexture {
+                        access: StorageTextureAccess::ReadWrite,
+                        format: TextureFormat::Rgba8Unorm,
+                        view_dimension: TextureViewDimension::D2,
+                    },
+                    count: None,
+                },
+                BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: Some(Matter::min_size()),
+                    },
+                    count: None,
+                },
+                BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: Some(Matter::min_size()),
+                    },
+                    count: None,
+                },
+            ],
+        );
         let shader = world
             .resource::<AssetServer>()
             .load("shaders/pixel_simulation.wgsl");
@@ -644,7 +651,7 @@ fn text_update_system(
     mut query: Query<&mut Text, With<FpsText>>,
 ) {
     for mut text in &mut query {
-        if let Some(fps) = diagnostics.get(FrameTimeDiagnosticsPlugin::FPS) {
+        if let Some(fps) = diagnostics.get(&FrameTimeDiagnosticsPlugin::FPS) {
             if let Some(value) = fps.smoothed() {
                 text.sections[1].value = format!("{value:.2}");
             }

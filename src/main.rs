@@ -215,6 +215,7 @@ fn main() {
             }),
             ..default()
         }))
+        .init_state::<BufferState>()
         .add_plugins((
             FrameTimeDiagnosticsPlugin::default(),
             PixelSimulationComputePlugin,
@@ -222,14 +223,15 @@ fn main() {
         .add_systems(Update, close_on_esc)
         .add_systems(Update, text_update_system)
         .add_systems(Startup, setup)
+        .add_systems(PreUpdate, swap)
         .add_systems(
             Update,
             (
                 unmap_all,
                 copy_buffer,
                 submit,
+                swap.run_if(in_state(BufferState::Writing)),
                 map_all,
-                swap,
                 on_click_compute,
             )
                 .chain(),
@@ -428,6 +430,7 @@ fn on_click_compute(
     device: Res<RenderDevice>,
     q_windows: Query<&Window, With<PrimaryWindow>>,
     queue: Res<RenderQueue>,
+    mut next_state: ResMut<NextState<BufferState>>,
 ) {
     if is_poll(&device) {
         if let Some(position) = q_windows.single().cursor_position() {
@@ -442,10 +445,14 @@ fn on_click_compute(
                     });
                 }
             }
+            if buttons.just_released(MouseButton::Left) {
+                next_state.set(BufferState::Normal);
+            }
             if buttons.pressed(MouseButton::Left) {
                 let matter_dst = global_storage.stage_buffers.get("matter_src").unwrap();
                 let radius = 5;
                 if matter_dst.mapped {
+                    next_state.set(BufferState::Writing);
                     let mut result =
                         cast_slice::<u8, Matter>(&matter_dst.buffer.slice(..).get_mapped_range())
                             .to_vec();
@@ -574,6 +581,13 @@ impl FromWorld for PixelSimulationPipeline {
             main_pipeline,
         }
     }
+}
+
+#[derive(States, Debug, Default, Clone, Eq, PartialEq, Hash)]
+pub enum BufferState {
+    #[default]
+    Normal,
+    Writing,
 }
 
 enum PixelSimulationState {

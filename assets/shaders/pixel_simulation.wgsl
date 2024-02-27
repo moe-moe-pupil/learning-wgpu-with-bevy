@@ -1,6 +1,16 @@
 const canvas_size_x = 512u;
 const canvas_size_y = 512u;
 const empty_matter = 0x00000000u;
+const DOWN_LEFT = 0;
+const DOWN = 1;
+const DOWN_RIGHT = 2;
+const RIGHT = 3;
+const UP_RIGHT = 4;
+const UP = 5;
+const UP_LEFT = 6;
+const LEFT = 7;
+
+const OFFSETS:array<vec2<i32>, 8> = array<vec2<i32>, 8>(vec2<i32>(-1, 1), vec2<i32>(0, 1), vec2<i32>(1, 1), vec2<i32>(1, 0), vec2<i32>(1, -1), vec2<i32>(0, -1), vec2<i32>(-1, -1), vec2<i32>(-1, 0));
 
 struct Matter {
     color: u32,
@@ -55,7 +65,7 @@ fn is_inside_canvas(index: i32) -> bool {
     return index >= 0 && index < i32(canvas_size_x * canvas_size_y);
 }
 
-fn get_neighbors(current_index: u32, to: vec2<u32>) {
+fn can_go_other_side(current_index: u32, to: vec2<u32>) {
 }
 
 @compute @workgroup_size(16, 16, 1)
@@ -64,9 +74,25 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let location = vec2<i32>(i32(global_id.x), i32(global_id.y));
 
     if is_empty(index) {
-        matter_dst[index].color = get_neighbors_color(index, vec2<i32>(0, -1)) ;
+        let up_index = get_neighbors_index(index, OFFSETS[UP]);
+        let left_up_index = get_neighbors_index(index, OFFSETS[UP_LEFT]);
+        let right_up_index = get_neighbors_index(index, OFFSETS[UP_RIGHT]);
+        if !is_empty(up_index) {
+            matter_dst[index].color = get_neighbors_color(index, OFFSETS[UP]) ;
+        } else {
+            if !is_empty(right_up_index) && !is_empty(get_neighbors_index(right_up_index, OFFSETS[DOWN])) {
+                matter_dst[index].color = get_neighbors_color(index, OFFSETS[UP_RIGHT]) ;
+            } else {
+                if !is_empty(get_neighbors_index(left_up_index, OFFSETS[DOWN])) && !is_empty(get_neighbors_index(left_up_index, OFFSETS[DOWN_LEFT])) {
+                    matter_dst[index].color = get_neighbors_color(index, OFFSETS[UP_LEFT]) ;
+                }
+            }
+        }
     } else {
-        if !is_empty(get_neighbors_index(index, vec2<i32>(0, 1))) || global_id.y == canvas_size_y - 1u {
+        let down_index = get_neighbors_index(index, OFFSETS[DOWN]);
+        let left_down_index = get_neighbors_index(index, OFFSETS[DOWN_LEFT]);
+        let right_down_index = get_neighbors_index(index, OFFSETS[DOWN_RIGHT]);
+        if global_id.y == canvas_size_y - 1u || ((!is_empty(down_index)) && (!is_empty(left_down_index) && global_id.x != 0) && (!is_empty(left_down_index) && global_id.x != canvas_size_x - 1u)) {
             matter_dst[index].color = matter_src[index].color;
         } else {
             matter_dst[index].color = empty_matter;

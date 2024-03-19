@@ -45,6 +45,7 @@ pub struct RenderContextStorage {
     encoder: Option<CommandEncoder>,
     queue: RenderQueue,
     device: RenderDevice,
+    submission_queue_processed: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -54,6 +55,23 @@ pub struct StagingBuffer {
 }
 
 impl RenderContextStorage {
+    fn poll(&mut self) -> bool {
+        match self.device.wgpu_device().poll(wgpu::MaintainBase::Poll) {
+            // The first few times the poll occurs the queue will be empty, because wgpu hasn't started anything yet.
+            // We need to wait until `MaintainResult::Ok`, which means wgpu has started to process our data.
+            // Then, the next time the queue is empty (`MaintainResult::SubmissionQueueEmpty`), wgpu has finished processing the data and we are done.
+            wgpu::MaintainResult::SubmissionQueueEmpty => {
+                let res = self.submission_queue_processed;
+                self.submission_queue_processed = false;
+                res
+            }
+            wgpu::MaintainResult::Ok => {
+                self.submission_queue_processed = true;
+                false
+            }
+        }
+    }
+
     fn submit(&mut self) -> &mut Self {
         let encoder = self.encoder.take().unwrap();
         self.queue.submit(Some(encoder.finish()));
@@ -97,15 +115,11 @@ impl GlobalStorage {
         for (_, staging_buffer) in self.stage_buffers.iter_mut() {
             let read_buffer_slice = staging_buffer.buffer.slice(..);
 
-            read_buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
-                let err = result.err();
-                if err.is_some() {
-                    let some_err = err.unwrap();
-                    panic!("{}", some_err.to_string());
+            read_buffer_slice.map_async(wgpu::MapMode::Read, |result| {
+                if let Some(err) = result.err() {
+                    panic!("{}", err.to_string());
                 }
             });
-
-            staging_buffer.mapped = true;
         }
         self
     }
@@ -164,13 +178,6 @@ struct Matter {
     color: u32,
 }
 
-fn is_poll(device: &Res<RenderDevice>) -> bool {
-    device
-        .wgpu_device()
-        .poll(wgpu::MaintainBase::Wait)
-        .is_queue_empty()
-}
-
 impl MousePos {
     pub fn new(pos: Vec2) -> MousePos {
         MousePos { world: pos }
@@ -200,6 +207,13 @@ pub fn get_canvas_line(prev: Option<MousePos>, current: MousePos) -> Vec<IVec2> 
     .collect::<Vec<IVec2>>()
 }
 
+fn update_state(state: ResMut<State<BufferState>>, mut next_state: ResMut<NextState<BufferState>>) {
+    match state.get() {
+        BufferState::FinishedWorking => next_state.set(BufferState::Available),
+        _ => {}
+    }
+}
+
 fn main() {
     //env_logger::init();
     App::new()
@@ -223,15 +237,14 @@ fn main() {
         .add_systems(Update, close_on_esc)
         .add_systems(Update, text_update_system)
         .add_systems(Startup, setup)
-        .add_systems(PreUpdate, swap)
         .add_systems(
             Update,
             (
-                unmap_all,
-                copy_buffer,
-                submit,
-                swap.run_if(in_state(BufferState::Writing)),
-                map_all,
+                update_state,
+                (unmap_all, swap, copy_buffer, submit, map_all)
+                    .chain()
+                    .run_if(not(in_state::<BufferState>(BufferState::Working))),
+                is_poll,
                 on_click_compute,
             )
                 .chain(),
@@ -239,6 +252,20 @@ fn main() {
         .run();
 }
 
+fn is_poll(
+    mut global_storage: ResMut<GlobalStorage>,
+    mut render_storage: ResMut<RenderContextStorage>,
+    state: ResMut<State<BufferState>>,
+    mut next_state: ResMut<NextState<BufferState>>,
+) {
+    if render_storage.poll() {
+        for (_, staging_buffer) in global_storage.stage_buffers.iter_mut() {
+            // By this the staging buffers would've been mapped.
+            staging_buffer.mapped = true;
+        }
+        next_state.set(BufferState::FinishedWorking)
+    }
+}
 fn setup(
     mut commands: Commands,
     mut images: ResMut<Assets<Image>>,
@@ -327,6 +354,7 @@ fn setup(
         ),
         queue: render_queue.clone(),
         device: render_device.clone(),
+        submission_queue_processed: false,
     });
     commands.insert_resource(new_storage);
 }
@@ -372,110 +400,96 @@ struct PixelSimulationImage {
 struct PixelSimulationBindGroup(BindGroup);
 
 fn copy_buffer(
-    global_storage: Res<GlobalStorage>,
+    mut global_storage: ResMut<GlobalStorage>,
     device: Res<RenderDevice>,
     queue: Res<RenderQueue>,
     mut render_storage: ResMut<RenderContextStorage>,
 ) {
-    if is_poll(&device) {
-        let matter_src = global_storage.buffers.get("matter_dst").unwrap();
-        let matter_dst = &global_storage
-            .stage_buffers
-            .get("matter_dst")
-            .unwrap()
-            .buffer;
-        render_storage.copy_buffer(matter_src, matter_dst, matter_dst.size());
+    let matter_src = global_storage.buffers.get("matter_dst").unwrap();
+    let matter_dst = &global_storage
+        .stage_buffers
+        .get("matter_dst")
+        .unwrap()
+        .buffer;
+    render_storage.copy_buffer(matter_src, matter_dst, matter_dst.size());
 
-        let matter_src = global_storage.buffers.get("matter_src").unwrap();
-        let matter_dst = &global_storage
-            .stage_buffers
-            .get("matter_src")
-            .unwrap()
-            .buffer;
-        render_storage.copy_buffer(matter_src, matter_dst, matter_dst.size());
-    }
+    let matter_src = global_storage.buffers.get("matter_src").unwrap();
+    let matter_dst = &global_storage
+        .stage_buffers
+        .get("matter_src")
+        .unwrap()
+        .buffer;
+    render_storage.copy_buffer(matter_src, matter_dst, matter_dst.size());
 }
 
 fn submit(
+    mut next_state: ResMut<NextState<BufferState>>,
     mut render_storage: ResMut<RenderContextStorage>,
-    queue: Res<RenderQueue>,
-    device: Res<RenderDevice>,
 ) {
-    if is_poll(&device) {
-        render_storage.submit();
-    }
+    render_storage.submit();
+    next_state.set(BufferState::Working)
 }
 
-fn swap(mut global_storage: ResMut<GlobalStorage>, device: Res<RenderDevice>) {
-    if is_poll(&device) {
-        global_storage.swap();
-    }
+fn swap(
+    mut global_storage: ResMut<GlobalStorage>,
+    device: Res<RenderDevice>,
+    mut render_storage: ResMut<RenderContextStorage>,
+) {
+    global_storage.swap();
 }
 
-fn unmap_all(mut global_storage: ResMut<GlobalStorage>, device: Res<RenderDevice>) {
-    if is_poll(&device) {
-        global_storage.unmap_staging_buffers();
-    }
+fn unmap_all(mut global_storage: ResMut<GlobalStorage>) {
+    global_storage.unmap_staging_buffers();
 }
 
-fn map_all(mut global_storage: ResMut<GlobalStorage>, device: Res<RenderDevice>) {
-    if is_poll(&device) {
-        global_storage.map_staging_buffers();
-    }
+fn map_all(mut global_storage: ResMut<GlobalStorage>) {
+    global_storage.map_staging_buffers();
 }
 
 fn on_click_compute(
     buttons: Res<ButtonInput<MouseButton>>,
     global_storage: Res<GlobalStorage>,
-    device: Res<RenderDevice>,
     q_windows: Query<&Window, With<PrimaryWindow>>,
     queue: Res<RenderQueue>,
-    mut next_state: ResMut<NextState<BufferState>>,
 ) {
-    if is_poll(&device) {
-        if let Some(position) = q_windows.single().cursor_position() {
-            if buttons.just_pressed(MouseButton::Right) {
-                let matter_dst = global_storage.stage_buffers.get("matter_dst").unwrap();
-                if matter_dst.mapped {
-                    let result =
-                        cast_slice::<u8, Matter>(&matter_dst.buffer.slice(..).get_mapped_range())
-                            .to_vec();
-                    result.iter().for_each(|m| {
-                        println!("{:?}", m);
-                    });
-                }
+    if let Some(position) = q_windows.single().cursor_position() {
+        if buttons.just_pressed(MouseButton::Right) {
+            let matter_dst = global_storage.stage_buffers.get("matter_dst").unwrap();
+            if matter_dst.mapped {
+                let result =
+                    cast_slice::<u8, Matter>(&matter_dst.buffer.slice(..).get_mapped_range())
+                        .to_vec();
+                result.iter().for_each(|m| {
+                    println!("{:?}", m);
+                });
             }
-            if buttons.just_released(MouseButton::Left) {
-                next_state.set(BufferState::Normal);
-            }
-            if buttons.pressed(MouseButton::Left) {
-                let matter_dst = global_storage.stage_buffers.get("matter_src").unwrap();
-                let radius = 5;
-                if matter_dst.mapped {
-                    next_state.set(BufferState::Writing);
-                    let mut result =
-                        cast_slice::<u8, Matter>(&matter_dst.buffer.slice(..).get_mapped_range())
-                            .to_vec();
-                    for x in position.as_ivec2().x - radius..=position.as_ivec2().x + radius {
-                        for y in position.as_ivec2().y - radius..=position.as_ivec2().y + radius {
-                            if is_point_in_canvas(Vec2 {
-                                x: x as f32,
-                                y: y as f32,
-                            }) {
-                                let index = (x + y * SIZE.0 as i32) as usize;
-                                result[index] = Matter {
-                                    color: 0xffffffffu32,
-                                };
-                            }
+        }
+        if buttons.pressed(MouseButton::Left) {
+            let matter_dst = global_storage.stage_buffers.get("matter_src").unwrap();
+            let radius = 5;
+            if matter_dst.mapped {
+                let mut result =
+                    cast_slice::<u8, Matter>(&matter_dst.buffer.slice(..).get_mapped_range())
+                        .to_vec();
+                for x in position.as_ivec2().x - radius..=position.as_ivec2().x + radius {
+                    for y in position.as_ivec2().y - radius..=position.as_ivec2().y + radius {
+                        if is_point_in_canvas(Vec2 {
+                            x: x as f32,
+                            y: y as f32,
+                        }) {
+                            let index = (x + y * SIZE.0 as i32) as usize;
+                            result[index] = Matter {
+                                color: 0xffffffffu32,
+                            };
                         }
                     }
-
-                    queue.write_buffer(
-                        global_storage.buffers.get("matter_src").unwrap(),
-                        0,
-                        cast_slice(&result),
-                    );
                 }
+
+                queue.write_buffer(
+                    global_storage.buffers.get("matter_src").unwrap(),
+                    0,
+                    cast_slice(&result),
+                );
             }
         }
     }
@@ -586,8 +600,10 @@ impl FromWorld for PixelSimulationPipeline {
 #[derive(States, Debug, Default, Clone, Eq, PartialEq, Hash)]
 pub enum BufferState {
     #[default]
-    Normal,
-    Writing,
+    Created,
+    Available,
+    Working,
+    FinishedWorking,
 }
 
 enum PixelSimulationState {

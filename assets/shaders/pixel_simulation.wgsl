@@ -72,7 +72,7 @@ fn can_go_other_side(current_index: u32, to: vec2<u32>) {
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let index = i32(global_id.x + global_id.y * canvas_size_x);
     let location = vec2<i32>(i32(global_id.x), i32(global_id.y));
-
+    matter_dst[index].color = empty_matter;
     if is_empty(index) {
         let up_index = get_neighbors_index(index, OFFSETS[UP]);
         let left_up_index = get_neighbors_index(index, OFFSETS[UP_LEFT]);

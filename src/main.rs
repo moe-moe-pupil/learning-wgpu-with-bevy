@@ -1,6 +1,8 @@
+use bevy_inspector_egui::quick::WorldInspectorPlugin;
 use bevy::{
     core::Pod,
     diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin},
+    input::mouse::MouseWheel,
     prelude::*,
     render::{
         extract_resource::{ExtractResource, ExtractResourcePlugin},
@@ -16,12 +18,21 @@ use bevy::{
     utils::HashMap,
     window::{close_on_esc, PrimaryWindow, WindowMode, WindowPlugin},
 };
+use bevy_pixel_camera::{PixelCameraPlugin, PixelViewport, PixelZoom};
 use bytemuck::{cast_slice, Zeroable};
+use bevy_inspector_egui::prelude::*;
+use bevy_inspector_egui::quick::ResourceInspectorPlugin;
 use line_drawing;
-use std::{borrow::Cow, num::NonZeroU64, println};
+use rand::prelude::*;
+use std::{
+    borrow::Cow,
+    cmp::{max, min},
+    num::NonZeroU64,
+    println,
+};
 #[derive(Debug, Hash, PartialEq, Eq, Clone, RenderLabel)]
 pub struct PixelSimulationLabel;
-const SIZE: (f32, f32) = (512.0, 512.0);
+const SIZE: (f32, f32) = (1024.0, 1024.0); // (512.0, 512.0);
 
 const NUM_MATTERS: u32 = (SIZE.0 * SIZE.1) as u32;
 
@@ -31,7 +42,8 @@ const NUM_MATTERS: u32 = (SIZE.0 * SIZE.1) as u32;
 pub fn cursor_to_world(window: &Window, camera_pos: Vec2, camera_scale: f32) -> Vec2 {
     (window.cursor_position().unwrap() - Vec2::new(window.width() / 2.0, window.height() / 2.0))
         * camera_scale
-        - camera_pos
+        + Vec2::new(window.width() / 2.0, window.height() / 2.0)
+        - Vec2::new(-camera_pos.x, camera_pos.y)
 }
 
 #[derive(Resource, Clone, ExtractResource)]
@@ -214,31 +226,47 @@ fn update_state(state: ResMut<State<BufferState>>, mut next_state: ResMut<NextSt
     }
 }
 
+#[derive(Reflect, Resource, Default, InspectorOptions)]
+#[reflect(Resource, InspectorOptions)]
+struct Brush {
+    #[inspector(min = 0)]
+    radius: i32,
+}
+
 fn main() {
     //env_logger::init();
     App::new()
         .insert_resource(ClearColor(Color::BLACK))
-        .add_plugins(DefaultPlugins.set(WindowPlugin {
-            primary_window: Some(Window {
-                title: "Bevy".into(),
-                resolution: SIZE.into(),
-                resizable: false,
-                present_mode: bevy::window::PresentMode::AutoNoVsync,
-                mode: WindowMode::Windowed,
-                ..default()
-            }),
-            ..default()
-        }))
+        .add_plugins(
+            DefaultPlugins
+                .set(WindowPlugin {
+                    primary_window: Some(Window {
+                        title: "Bevy".into(),
+                        resolution: SIZE.into(),
+                        resizable: false,
+                        present_mode: bevy::window::PresentMode::AutoNoVsync,
+                        mode: WindowMode::Windowed,
+                        ..default()
+                    }),
+                    ..default()
+                })
+                .set(ImagePlugin::default_nearest()),
+        )
         .init_state::<BufferState>()
+        .add_plugins(WorldInspectorPlugin::new())
+        .add_plugins(PixelCameraPlugin)
         .add_plugins((
             FrameTimeDiagnosticsPlugin::default(),
             PixelSimulationComputePlugin,
         ))
+        .init_resource::<Brush>() // `ResourceInspectorPlugin` won't initialize the resource
+        .register_type::<Brush>() // you need to register your type to display it
+        .add_plugins(ResourceInspectorPlugin::<Brush>::default())
         .add_systems(Update, close_on_esc)
         .add_systems(Update, text_update_system)
         .add_systems(Startup, setup)
         .add_systems(
-            Update,
+            PreUpdate,
             (
                 update_state,
                 (unmap_all, swap, copy_buffer, submit, map_all)
@@ -296,7 +324,14 @@ fn setup(
         texture: image.clone(),
         ..default()
     });
-    commands.spawn(Camera2dBundle::default());
+    commands.spawn((
+        Camera2dBundle::default(),
+        PixelZoom::FitSize {
+            width: SIZE.0 as i32,
+            height: SIZE.1 as i32,
+        },
+        PixelViewport,
+    ));
 
     commands.insert_resource(PixelSimulationImage { texture: image });
 
@@ -432,8 +467,6 @@ fn submit(
 
 fn swap(
     mut global_storage: ResMut<GlobalStorage>,
-    device: Res<RenderDevice>,
-    mut render_storage: ResMut<RenderContextStorage>,
 ) {
     global_storage.swap();
 }
@@ -447,40 +480,84 @@ fn map_all(mut global_storage: ResMut<GlobalStorage>) {
 }
 
 fn on_click_compute(
-    buttons: Res<ButtonInput<MouseButton>>,
+    mouse_btns: Res<ButtonInput<MouseButton>>,
+    keyboard_btns: Res<ButtonInput<KeyCode>>,
     global_storage: Res<GlobalStorage>,
     q_windows: Query<&Window, With<PrimaryWindow>>,
+    mut query: Query<&mut Transform, With<Camera>>,
     queue: Res<RenderQueue>,
+    mut scroll_evr: EventReader<MouseWheel>,
+    brush: Res<Brush>
 ) {
     if let Some(position) = q_windows.single().cursor_position() {
-        if buttons.just_pressed(MouseButton::Right) {
-            let matter_dst = global_storage.stage_buffers.get("matter_dst").unwrap();
-            if matter_dst.mapped {
-                let result =
-                    cast_slice::<u8, Matter>(&matter_dst.buffer.slice(..).get_mapped_range())
-                        .to_vec();
-                result.iter().for_each(|m| {
-                    println!("{:?}", m);
-                });
+        // if buttons.just_pressed(MouseButton::Right) {
+        //     let matter_dst = global_storage.stage_buffers.get("matter_dst").unwrap();
+        //     if matter_dst.mapped {
+        //         let result =
+        //             cast_slice::<u8, Matter>(&matter_dst.buffer.slice(..).get_mapped_range())
+        //                 .to_vec();
+        //         result.iter().for_each(|m| {
+        //             println!("{:?}", m);
+        //         });
+        //     }
+        // }
+        let mut world_pos = position;
+        for ev in scroll_evr.read() {
+            for mut transform in query.iter_mut() {
+                transform.scale += 0.05 * ev.y;                
             }
         }
-        if buttons.pressed(MouseButton::Left) {
+        if keyboard_btns.pressed(KeyCode::ArrowDown) {
+            for mut transform in query.iter_mut() {
+                transform.translation.y -= 0.5;
+            }
+        }
+        if keyboard_btns.pressed(KeyCode::ArrowUp) {
+            for mut transform in query.iter_mut() {
+                transform.translation.y += 0.5;
+            }
+        }
+        if keyboard_btns.pressed(KeyCode::ArrowLeft) {
+            for mut transform in query.iter_mut() {
+                transform.translation.x -= 0.5;
+            }
+        }
+        if keyboard_btns.pressed(KeyCode::ArrowRight) {
+            for mut transform in query.iter_mut() {
+                transform.translation.x += 0.5;
+            }
+        }
+        for mut transform in query.iter_mut() {
+            world_pos = cursor_to_world(
+                &q_windows.single(),
+                transform.translation.xy(),
+                transform.scale.x,
+            );
+        }
+
+        if mouse_btns.any_pressed([MouseButton::Left, MouseButton::Right]) {
             let matter_dst = global_storage.stage_buffers.get("matter_src").unwrap();
-            let radius = 5;
+            let radius = brush.radius;
+            let mut rng = rand::thread_rng();
             if matter_dst.mapped {
                 let mut result =
                     cast_slice::<u8, Matter>(&matter_dst.buffer.slice(..).get_mapped_range())
                         .to_vec();
-                for x in position.as_ivec2().x - radius..=position.as_ivec2().x + radius {
-                    for y in position.as_ivec2().y - radius..=position.as_ivec2().y + radius {
+                for x in world_pos.as_ivec2().x - radius..=world_pos.as_ivec2().x + radius {
+                    for y in world_pos.as_ivec2().y - radius..=world_pos.as_ivec2().y + radius {
                         if is_point_in_canvas(Vec2 {
                             x: x as f32,
                             y: y as f32,
                         }) {
                             let index = (x + y * SIZE.0 as i32) as usize;
-                            result[index] = Matter {
-                                color: 0xffffffffu32,
-                            };
+                            if mouse_btns.pressed(MouseButton::Left) {
+                                result[index] = Matter {
+                                    color: 0xc2b280ffu32 - 0x01010100u32 * 30
+                                        + rng.gen_range(0..30) * 0x010101ffu32,
+                                };
+                            } else if mouse_btns.pressed(MouseButton::Right) {
+                                result[index] = Matter { color: 0 };
+                            }
                         }
                     }
                 }

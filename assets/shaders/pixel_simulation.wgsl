@@ -1,5 +1,5 @@
-const canvas_size_x = 512u;
-const canvas_size_y = 512u;
+const canvas_size_x = 1024u;
+const canvas_size_y = 1024u;
 const empty_matter = 0x00000000u;
 const DOWN_LEFT = 0;
 const DOWN = 1;
@@ -80,10 +80,10 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         if !is_empty(up_index) {
             matter_dst[index].color = get_neighbors_color(index, OFFSETS[UP]) ;
         } else {
-            if !is_empty(right_up_index) && !is_empty(get_neighbors_index(right_up_index, OFFSETS[DOWN])) {
+            if global_id.x != canvas_size_x - 1 && !is_empty(right_up_index) && !is_empty(get_neighbors_index(right_up_index, OFFSETS[DOWN])) {
                 matter_dst[index].color = get_neighbors_color(index, OFFSETS[UP_RIGHT]) ;
             } else {
-                if !is_empty(get_neighbors_index(left_up_index, OFFSETS[DOWN])) && !is_empty(get_neighbors_index(left_up_index, OFFSETS[DOWN_LEFT])) {
+                if global_id.x != 0 && !is_empty(left_up_index) && !is_empty(get_neighbors_index(left_up_index, OFFSETS[DOWN])) && !is_empty(get_neighbors_index(left_up_index, OFFSETS[DOWN_LEFT])) {
                     matter_dst[index].color = get_neighbors_color(index, OFFSETS[UP_LEFT]) ;
                 }
             }
@@ -92,12 +92,15 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         let down_index = get_neighbors_index(index, OFFSETS[DOWN]);
         let left_down_index = get_neighbors_index(index, OFFSETS[DOWN_LEFT]);
         let right_down_index = get_neighbors_index(index, OFFSETS[DOWN_RIGHT]);
-        if global_id.y == canvas_size_y - 1u || ((!is_empty(down_index)) && (!is_empty(left_down_index) && global_id.x != 0) && (!is_empty(left_down_index) && global_id.x != canvas_size_x - 1u)) {
-            matter_dst[index].color = matter_src[index].color;
-        } else {
+        let can_go_down = is_empty(down_index);
+        let can_go_left = global_id.x != 0  && is_empty(left_down_index);
+        let can_go_right = global_id.x != canvas_size_x -1 && is_empty(right_down_index);
+        if global_id.y != canvas_size_y - 1 && (can_go_down || can_go_left || can_go_right ){
             matter_dst[index].color = empty_matter;
+        } else {
+            matter_dst[index].color = matter_src[index].color;
         }
     }
-    storageBarrier();
+    // storageBarrier();
     textureStore(texture, location, matter_color_to_vec4(matter_dst[index].color));
 }

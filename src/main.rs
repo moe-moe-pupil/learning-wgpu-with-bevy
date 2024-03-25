@@ -369,12 +369,13 @@ fn setup(
     ));
 
     let mut initial_matter_data = Vec::with_capacity(NUM_MATTERS as usize);
-
+    let mut initial_fall_map = Vec::with_capacity(NUM_MATTERS as usize);
     //FIXME use more readable code
     for i in 0..NUM_MATTERS {
         initial_matter_data.push(Matter {
             color: 0x00000000u32,
         });
+        initial_fall_map.push(0_u32)
     }
 
     let mut new_storage: GlobalStorage = GlobalStorage {
@@ -383,6 +384,7 @@ fn setup(
     };
     new_storage.add_buffer("matter_src", &initial_matter_data, render_device.as_ref());
     new_storage.add_buffer("matter_dst", &initial_matter_data, render_device.as_ref());
+    new_storage.add_buffer("can_fall_map", &initial_fall_map, render_device.as_ref());
     commands.insert_resource(RenderContextStorage {
         encoder: Some(
             render_device.create_command_encoder(&CommandEncoderDescriptor { label: None }),
@@ -606,6 +608,14 @@ fn queue_bind_group(
                     .unwrap()
                     .as_entire_binding(),
             },
+            BindGroupEntry {
+                binding: 3,
+                resource: storage
+                    .buffers
+                    .get("can_fall_map")
+                    .unwrap()
+                    .as_entire_binding(),
+            },
         ],
     );
     commands.insert_resource(PixelSimulationBindGroup(bind_group));
@@ -644,6 +654,16 @@ impl FromWorld for PixelSimulationPipeline {
                 },
                 BindGroupLayoutEntry {
                     binding: 2,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: Some(Matter::min_size()),
+                    },
+                    count: None,
+                },
+                BindGroupLayoutEntry {
+                    binding: 3,
                     visibility: ShaderStages::COMPUTE,
                     ty: BindingType::Buffer {
                         ty: BufferBindingType::Storage { read_only: false },

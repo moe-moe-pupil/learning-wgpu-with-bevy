@@ -1,4 +1,3 @@
-use bevy_inspector_egui::quick::WorldInspectorPlugin;
 use bevy::{
     core::Pod,
     diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin},
@@ -18,10 +17,11 @@ use bevy::{
     utils::HashMap,
     window::{close_on_esc, PrimaryWindow, WindowMode, WindowPlugin},
 };
-use bevy_pixel_camera::{PixelCameraPlugin, PixelViewport, PixelZoom};
-use bytemuck::{cast_slice, Zeroable};
 use bevy_inspector_egui::prelude::*;
 use bevy_inspector_egui::quick::ResourceInspectorPlugin;
+use bevy_inspector_egui::quick::WorldInspectorPlugin;
+use bevy_pixel_camera::{PixelCameraPlugin, PixelViewport, PixelZoom};
+use bytemuck::{cast_slice, Zeroable};
 use line_drawing;
 use rand::prelude::*;
 use std::{
@@ -188,6 +188,14 @@ pub struct MousePos {
 #[repr(C)]
 struct Matter {
     color: u32,
+}
+
+#[derive(ShaderType, Pod, Zeroable, Clone, Copy, Debug)]
+#[repr(C)]
+struct Line {
+    prev_height: u32,
+    height: u32,
+    can_move: u32,
 }
 
 impl MousePos {
@@ -375,7 +383,11 @@ fn setup(
         initial_matter_data.push(Matter {
             color: 0x00000000u32,
         });
-        initial_fall_map.push(0_u32)
+        initial_fall_map.push(Line {
+            prev_height: 0_u32,
+            height: 0_u32,
+            can_move: 0_u32,
+        })
     }
 
     let mut new_storage: GlobalStorage = GlobalStorage {
@@ -467,9 +479,7 @@ fn submit(
     next_state.set(BufferState::Working)
 }
 
-fn swap(
-    mut global_storage: ResMut<GlobalStorage>,
-) {
+fn swap(mut global_storage: ResMut<GlobalStorage>) {
     global_storage.swap();
 }
 
@@ -489,7 +499,7 @@ fn on_click_compute(
     mut query: Query<&mut Transform, With<Camera>>,
     queue: Res<RenderQueue>,
     mut scroll_evr: EventReader<MouseWheel>,
-    brush: Res<Brush>
+    brush: Res<Brush>,
 ) {
     if let Some(position) = q_windows.single().cursor_position() {
         // if buttons.just_pressed(MouseButton::Right) {
@@ -506,7 +516,7 @@ fn on_click_compute(
         let mut world_pos = position;
         for ev in scroll_evr.read() {
             for mut transform in query.iter_mut() {
-                transform.scale += 0.05 * ev.y;                
+                transform.scale += 0.05 * ev.y;
             }
         }
         if keyboard_btns.pressed(KeyCode::ArrowDown) {
@@ -668,7 +678,7 @@ impl FromWorld for PixelSimulationPipeline {
                     ty: BindingType::Buffer {
                         ty: BufferBindingType::Storage { read_only: false },
                         has_dynamic_offset: false,
-                        min_binding_size: Some(Matter::min_size()),
+                        min_binding_size: Some(Line::min_size()),
                     },
                     count: None,
                 },

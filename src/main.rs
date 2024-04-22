@@ -25,14 +25,16 @@ use bytemuck::{cast_slice, Zeroable};
 use line_drawing;
 use rand::prelude::*;
 use std::{
+    any,
     borrow::Cow,
     cmp::{max, min},
     num::NonZeroU64,
     println,
+    time::SystemTime,
 };
 #[derive(Debug, Hash, PartialEq, Eq, Clone, RenderLabel)]
 pub struct PixelSimulationLabel;
-const SIZE: (f32, f32) = (1024.0, 1024.0); // (512.0, 512.0);
+const SIZE: (f32, f32) = (512.0, 512.0); // (512.0, 512.0);
 
 const NUM_MATTERS: u32 = (SIZE.0 * SIZE.1) as u32;
 
@@ -245,6 +247,7 @@ fn main() {
     //env_logger::init();
     App::new()
         .insert_resource(ClearColor(Color::BLACK))
+        .insert_resource(Msaa::Off)
         .add_plugins(
             DefaultPlugins
                 .set(WindowPlugin {
@@ -261,7 +264,7 @@ fn main() {
                 .set(ImagePlugin::default_nearest()),
         )
         .init_state::<BufferState>()
-        .add_plugins(WorldInspectorPlugin::new())
+        // .add_plugins(WorldInspectorPlugin::new())
         .add_plugins(PixelCameraPlugin)
         .add_plugins((
             FrameTimeDiagnosticsPlugin::default(),
@@ -279,7 +282,7 @@ fn main() {
                 update_state,
                 (unmap_all, swap, copy_buffer, submit, map_all)
                     .chain()
-                    .run_if(not(in_state::<BufferState>(BufferState::Working))),
+                    .run_if( not(in_state::<BufferState>(BufferState::Working))),
                 is_poll,
                 on_click_compute,
             )
@@ -381,7 +384,7 @@ fn setup(
     //FIXME use more readable code
     for i in 0..NUM_MATTERS {
         initial_matter_data.push(Matter {
-            color: 0x00000000u32,
+            color: 0xffffffffu32,
         });
         initial_fall_map.push(Line {
             prev_height: 0_u32,
@@ -477,6 +480,7 @@ fn submit(
 ) {
     render_storage.submit();
     next_state.set(BufferState::Working)
+
 }
 
 fn swap(mut global_storage: ResMut<GlobalStorage>) {
@@ -568,7 +572,9 @@ fn on_click_compute(
                                         + rng.gen_range(0..30) * 0x010101ffu32,
                                 };
                             } else if mouse_btns.pressed(MouseButton::Right) {
-                                result[index] = Matter { color: 0 };
+                                result[index] = Matter {
+                                    color: 0xffffffffu32,
+                                };
                             }
                         }
                     }

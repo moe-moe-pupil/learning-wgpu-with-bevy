@@ -277,7 +277,7 @@ fn main() {
         .add_systems(Update, text_update_system)
         .add_systems(Startup, setup)
         .add_systems(
-            PreUpdate,
+            Update,
             (
                 update_state,
                 (unmap_all, swap, copy_buffer, submit, map_all)

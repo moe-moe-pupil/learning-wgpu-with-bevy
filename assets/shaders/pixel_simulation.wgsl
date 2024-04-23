@@ -120,9 +120,7 @@ fn calc_can_fall(col: u32, row: u32) {
     swap_height(index);
     for (var i = row + 1; i < canvas_size_y; i++) {
         let find_index = i32(i * canvas_size_x + col);
-        let left_up_index = get_neighbors_index(find_index, OFFSETS[UP_LEFT]);
-        let right_up_index = get_neighbors_index(find_index, OFFSETS[UP_RIGHT]);
-        if if_will_empty(find_index) && is_empty(left_up_index) && is_empty(right_up_index) {
+        if if_will_empty(find_index) {
             can_fall_map[index].height = new_height;
             can_fall_map[index].can_move = u32(2);
             if can_fall_map[index].height != can_fall_map[index].prev_height {
@@ -154,6 +152,16 @@ fn calc_connected_point(index: i32, col: u32, row: u32) -> u32 {
     return empty_u32;
 }
 
+fn calc_index_can_fall(index: i32, x: u32, y: u32) {
+    calc_can_fall(x, y);
+    if can_fall_map[index].can_move != u32(2) {
+        calc_can_go_left_down(x, y);
+        if can_fall_map[index].can_move != u32(1) {
+            calc_can_go_right_down(x, y);
+        }
+    }
+}
+
 // the top tile can go down or not?
 fn if_will_empty(index: i32) -> bool {
     return is_empty(index) || can_fall_map[index].can_move != empty_u32;
@@ -180,6 +188,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let index = i32(global_id.x + global_id.y * canvas_size_x);
     let location = vec2<i32>(i32(global_id.x), i32(global_id.y));
     matter_dst[index].color = empty_matter;
+    can_fall_map[index].can_move = empty_u32;
     if !is_empty(index) {
         calc_can_fall(global_id.x, global_id.y);
         if can_fall_map[index].can_move != u32(2) {
@@ -194,6 +203,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         let up_index = get_neighbors_index(index, OFFSETS[UP]);
         let left_up_index = get_neighbors_index(index, OFFSETS[UP_LEFT]);
         let right_up_index = get_neighbors_index(index, OFFSETS[UP_RIGHT]);
+
         if !is_empty(up_index) {
             can_fall_map[index].can_move = empty_u32;
             matter_dst[index].color = get_neighbors_color(index, OFFSETS[UP]) ;

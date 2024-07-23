@@ -1,38 +1,35 @@
-use bevy_inspector_egui::quick::WorldInspectorPlugin;
 use bevy::{
-    core::Pod,
     diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin},
     input::mouse::MouseWheel,
     prelude::*,
     render::{
-        extract_resource::{ExtractResource, ExtractResourcePlugin},
-        render_asset::{RenderAssetUsages, RenderAssets},
-        render_graph::{self, RenderGraph, RenderLabel},
-        render_resource::{
+        extract_resource::{ExtractResource, ExtractResourcePlugin}, render_asset::{RenderAssetUsages, RenderAssets}, render_graph::{self, RenderGraph, RenderLabel}, render_resource::{
             encase::{private::WriteInto, StorageBuffer},
             *,
-        },
-        renderer::{RenderContext, RenderDevice, RenderQueue},
-        Render, RenderApp, RenderSet,
+        }, renderer::{RenderContext, RenderDevice, RenderQueue}, texture::GpuImage, Render, RenderApp, RenderSet
     },
     utils::HashMap,
-    window::{close_on_esc, PrimaryWindow, WindowMode, WindowPlugin},
+    window::{PrimaryWindow, WindowMode, WindowPlugin},
 };
-use bevy_pixel_camera::{PixelCameraPlugin, PixelViewport, PixelZoom};
-use bytemuck::{cast_slice, Zeroable};
 use bevy_inspector_egui::prelude::*;
 use bevy_inspector_egui::quick::ResourceInspectorPlugin;
+use bevy_inspector_egui::quick::WorldInspectorPlugin;
+use bevy_pixel_camera::{PixelCameraPlugin, PixelViewport, PixelZoom};
+use bytemuck::Pod;
+use bytemuck::{cast_slice, Zeroable};
 use line_drawing;
 use rand::prelude::*;
 use std::{
+    any,
     borrow::Cow,
     cmp::{max, min},
     num::NonZeroU64,
     println,
+    time::SystemTime,
 };
 #[derive(Debug, Hash, PartialEq, Eq, Clone, RenderLabel)]
 pub struct PixelSimulationLabel;
-const SIZE: (f32, f32) = (1024.0, 1024.0); // (512.0, 512.0);
+const SIZE: (f32, f32) = (512.0, 512.0); // (512.0, 512.0);
 
 const NUM_MATTERS: u32 = (SIZE.0 * SIZE.1) as u32;
 
@@ -127,7 +124,7 @@ impl GlobalStorage {
         for (_, staging_buffer) in self.stage_buffers.iter_mut() {
             let read_buffer_slice = staging_buffer.buffer.slice(..);
 
-            read_buffer_slice.map_async(wgpu::MapMode::Read, |result| {
+            read_buffer_slice.map_async(MapMode::Read, |result| {
                 if let Some(err) = result.err() {
                     panic!("{}", err.to_string());
                 }
@@ -190,6 +187,14 @@ struct Matter {
     color: u32,
 }
 
+#[derive(ShaderType, Pod, Zeroable, Clone, Copy, Debug)]
+#[repr(C)]
+struct Line {
+    prev_height: u32,
+    height: u32,
+    can_move: u32,
+}
+
 impl MousePos {
     pub fn new(pos: Vec2) -> MousePos {
         MousePos { world: pos }
@@ -237,6 +242,7 @@ fn main() {
     //env_logger::init();
     App::new()
         .insert_resource(ClearColor(Color::BLACK))
+        .insert_resource(Msaa::Off)
         .add_plugins(
             DefaultPlugins
                 .set(WindowPlugin {
@@ -253,7 +259,7 @@ fn main() {
                 .set(ImagePlugin::default_nearest()),
         )
         .init_state::<BufferState>()
-        .add_plugins(WorldInspectorPlugin::new())
+        // .add_plugins(WorldInspectorPlugin::new())
         .add_plugins(PixelCameraPlugin)
         .add_plugins((
             FrameTimeDiagnosticsPlugin::default(),
@@ -262,11 +268,10 @@ fn main() {
         .init_resource::<Brush>() // `ResourceInspectorPlugin` won't initialize the resource
         .register_type::<Brush>() // you need to register your type to display it
         .add_plugins(ResourceInspectorPlugin::<Brush>::default())
-        .add_systems(Update, close_on_esc)
         .add_systems(Update, text_update_system)
         .add_systems(Startup, setup)
         .add_systems(
-            PreUpdate,
+            Update,
             (
                 update_state,
                 (unmap_all, swap, copy_buffer, submit, map_all)
@@ -351,7 +356,7 @@ fn setup(
                 TextStyle {
                     font: font.clone(),
                     font_size: 40.0,
-                    color: Color::BEIGE,
+                    color: Color::BLACK,
                 },
             ),
         ])
@@ -369,12 +374,17 @@ fn setup(
     ));
 
     let mut initial_matter_data = Vec::with_capacity(NUM_MATTERS as usize);
-
+    let mut initial_fall_map = Vec::with_capacity(NUM_MATTERS as usize);
     //FIXME use more readable code
     for i in 0..NUM_MATTERS {
         initial_matter_data.push(Matter {
-            color: 0x00000000u32,
+            color: 0xffffffffu32,
         });
+        initial_fall_map.push(Line {
+            prev_height: 0_u32,
+            height: 0_u32,
+            can_move: 0_u32,
+        })
     }
 
     let mut new_storage: GlobalStorage = GlobalStorage {
@@ -383,6 +393,7 @@ fn setup(
     };
     new_storage.add_buffer("matter_src", &initial_matter_data, render_device.as_ref());
     new_storage.add_buffer("matter_dst", &initial_matter_data, render_device.as_ref());
+    new_storage.add_buffer("can_fall_map", &initial_fall_map, render_device.as_ref());
     commands.insert_resource(RenderContextStorage {
         encoder: Some(
             render_device.create_command_encoder(&CommandEncoderDescriptor { label: None }),
@@ -414,7 +425,7 @@ impl Plugin for PixelSimulationComputePlugin {
             queue_bind_group.in_set(RenderSet::PrepareBindGroups),
         );
 
-        let mut render_graph = render_app.world.resource_mut::<RenderGraph>();
+        let mut render_graph = render_app.world_mut().resource_mut::<RenderGraph>();
         render_graph.add_node(PixelSimulationLabel, PixelSimulationNode::default());
         render_graph.add_node_edge(PixelSimulationLabel, bevy::render::graph::CameraDriverLabel);
     }
@@ -465,9 +476,7 @@ fn submit(
     next_state.set(BufferState::Working)
 }
 
-fn swap(
-    mut global_storage: ResMut<GlobalStorage>,
-) {
+fn swap(mut global_storage: ResMut<GlobalStorage>) {
     global_storage.swap();
 }
 
@@ -487,7 +496,7 @@ fn on_click_compute(
     mut query: Query<&mut Transform, With<Camera>>,
     queue: Res<RenderQueue>,
     mut scroll_evr: EventReader<MouseWheel>,
-    brush: Res<Brush>
+    brush: Res<Brush>,
 ) {
     if let Some(position) = q_windows.single().cursor_position() {
         // if buttons.just_pressed(MouseButton::Right) {
@@ -504,7 +513,7 @@ fn on_click_compute(
         let mut world_pos = position;
         for ev in scroll_evr.read() {
             for mut transform in query.iter_mut() {
-                transform.scale += 0.05 * ev.y;                
+                transform.scale += 0.05 * ev.y;
             }
         }
         if keyboard_btns.pressed(KeyCode::ArrowDown) {
@@ -556,7 +565,9 @@ fn on_click_compute(
                                         + rng.gen_range(0..30) * 0x010101ffu32,
                                 };
                             } else if mouse_btns.pressed(MouseButton::Right) {
-                                result[index] = Matter { color: 0 };
+                                result[index] = Matter {
+                                    color: 0xffffffffu32,
+                                };
                             }
                         }
                     }
@@ -575,7 +586,7 @@ fn on_click_compute(
 fn queue_bind_group(
     mut commands: Commands,
     pipeline: Res<PixelSimulationPipeline>,
-    gpu_images: Res<RenderAssets<Image>>,
+    gpu_images: Res<RenderAssets<GpuImage>>,
     pixel_simulation_image: Res<PixelSimulationImage>,
     render_device: Res<RenderDevice>,
     storage: Res<GlobalStorage>,
@@ -603,6 +614,14 @@ fn queue_bind_group(
                 resource: storage
                     .buffers
                     .get("matter_dst")
+                    .unwrap()
+                    .as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 3,
+                resource: storage
+                    .buffers
+                    .get("can_fall_map")
                     .unwrap()
                     .as_entire_binding(),
             },
@@ -649,6 +668,16 @@ impl FromWorld for PixelSimulationPipeline {
                         ty: BufferBindingType::Storage { read_only: false },
                         has_dynamic_offset: false,
                         min_binding_size: Some(Matter::min_size()),
+                    },
+                    count: None,
+                },
+                BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: Some(Line::min_size()),
                     },
                     count: None,
                 },

@@ -1,26 +1,21 @@
 use bevy::{
-    core::Pod,
     diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin},
     input::mouse::MouseWheel,
     prelude::*,
     render::{
-        extract_resource::{ExtractResource, ExtractResourcePlugin},
-        render_asset::{RenderAssetUsages, RenderAssets},
-        render_graph::{self, RenderGraph, RenderLabel},
-        render_resource::{
+        extract_resource::{ExtractResource, ExtractResourcePlugin}, render_asset::{RenderAssetUsages, RenderAssets}, render_graph::{self, RenderGraph, RenderLabel}, render_resource::{
             encase::{private::WriteInto, StorageBuffer},
             *,
-        },
-        renderer::{RenderContext, RenderDevice, RenderQueue},
-        Render, RenderApp, RenderSet,
+        }, renderer::{RenderContext, RenderDevice, RenderQueue}, texture::GpuImage, Render, RenderApp, RenderSet
     },
     utils::HashMap,
-    window::{close_on_esc, PrimaryWindow, WindowMode, WindowPlugin},
+    window::{PrimaryWindow, WindowMode, WindowPlugin},
 };
 use bevy_inspector_egui::prelude::*;
 use bevy_inspector_egui::quick::ResourceInspectorPlugin;
 use bevy_inspector_egui::quick::WorldInspectorPlugin;
 use bevy_pixel_camera::{PixelCameraPlugin, PixelViewport, PixelZoom};
+use bytemuck::Pod;
 use bytemuck::{cast_slice, Zeroable};
 use line_drawing;
 use rand::prelude::*;
@@ -129,7 +124,7 @@ impl GlobalStorage {
         for (_, staging_buffer) in self.stage_buffers.iter_mut() {
             let read_buffer_slice = staging_buffer.buffer.slice(..);
 
-            read_buffer_slice.map_async(wgpu::MapMode::Read, |result| {
+            read_buffer_slice.map_async(MapMode::Read, |result| {
                 if let Some(err) = result.err() {
                     panic!("{}", err.to_string());
                 }
@@ -273,7 +268,6 @@ fn main() {
         .init_resource::<Brush>() // `ResourceInspectorPlugin` won't initialize the resource
         .register_type::<Brush>() // you need to register your type to display it
         .add_plugins(ResourceInspectorPlugin::<Brush>::default())
-        .add_systems(Update, close_on_esc)
         .add_systems(Update, text_update_system)
         .add_systems(Startup, setup)
         .add_systems(
@@ -282,7 +276,7 @@ fn main() {
                 update_state,
                 (unmap_all, swap, copy_buffer, submit, map_all)
                     .chain()
-                    .run_if( not(in_state::<BufferState>(BufferState::Working))),
+                    .run_if(not(in_state::<BufferState>(BufferState::Working))),
                 is_poll,
                 on_click_compute,
             )
@@ -362,7 +356,7 @@ fn setup(
                 TextStyle {
                     font: font.clone(),
                     font_size: 40.0,
-                    color: Color::BEIGE,
+                    color: Color::BLACK,
                 },
             ),
         ])
@@ -431,7 +425,7 @@ impl Plugin for PixelSimulationComputePlugin {
             queue_bind_group.in_set(RenderSet::PrepareBindGroups),
         );
 
-        let mut render_graph = render_app.world.resource_mut::<RenderGraph>();
+        let mut render_graph = render_app.world_mut().resource_mut::<RenderGraph>();
         render_graph.add_node(PixelSimulationLabel, PixelSimulationNode::default());
         render_graph.add_node_edge(PixelSimulationLabel, bevy::render::graph::CameraDriverLabel);
     }
@@ -480,7 +474,6 @@ fn submit(
 ) {
     render_storage.submit();
     next_state.set(BufferState::Working)
-
 }
 
 fn swap(mut global_storage: ResMut<GlobalStorage>) {
@@ -593,7 +586,7 @@ fn on_click_compute(
 fn queue_bind_group(
     mut commands: Commands,
     pipeline: Res<PixelSimulationPipeline>,
-    gpu_images: Res<RenderAssets<Image>>,
+    gpu_images: Res<RenderAssets<GpuImage>>,
     pixel_simulation_image: Res<PixelSimulationImage>,
     render_device: Res<RenderDevice>,
     storage: Res<GlobalStorage>,

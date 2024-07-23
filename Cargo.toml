@@ -6,14 +6,14 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-bevy = { version = "0.13.0"}
-bevy-inspector-egui = "0.23.4"
-bevy_pixel_camera = "0.13.0"
+bevy = { version = "0.14.0"}
+bevy-inspector-egui = "0.25.1"
+bevy_pixel_camera = {git = "https://github.com/porkbrain/bevy_pixel_camera.git", branch = "bevy-v0.14"}
 bytemuck = "1.13.1"
 env_logger = "0.11.2"
 line_drawing = "1.0.0"
 log = "0.4.17"
 pollster = "0.3.0"
 rand = "0.8.5"
-wgpu = "0.19.1"
-winit = "0.29.10"
+wgpu = "0.20.1"
+winit = "0.30.4"

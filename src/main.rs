@@ -17,6 +17,7 @@ use bevy::{
     utils::HashMap,
     window::{PrimaryWindow, WindowMode, WindowPlugin},
 };
+use bevy_framepace::Limiter;
 use bevy_inspector_egui::prelude::*;
 use bevy_inspector_egui::quick::ResourceInspectorPlugin;
 use bevy_inspector_egui::quick::WorldInspectorPlugin;
@@ -271,6 +272,7 @@ fn main() {
         .add_plugins((
             FrameTimeDiagnosticsPlugin::default(),
             PixelSimulationComputePlugin,
+            bevy_framepace::FramepacePlugin,
         ))
         .init_resource::<Brush>() // `ResourceInspectorPlugin` won't initialize the resource
         .register_type::<Brush>() // you need to register your type to display it
@@ -312,7 +314,9 @@ fn setup(
     asset_server: Res<AssetServer>,
     render_device: Res<RenderDevice>,
     render_queue: Res<RenderQueue>,
+    mut settings: ResMut<bevy_framepace::FramepaceSettings>,
 ) {
+    settings.limiter = Limiter::from_framerate(300.0);
     let mut image = Image::new_fill(
         Extent3d {
             width: SIZE.0 as u32,

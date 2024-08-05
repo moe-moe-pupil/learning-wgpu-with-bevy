@@ -191,6 +191,7 @@ pub struct MousePos {
 #[repr(C)]
 struct Matter {
     color: u32,
+    lock: u32,
 }
 
 #[derive(ShaderType, Pod, Zeroable, Clone, Copy, Debug)]
@@ -384,6 +385,7 @@ fn setup(
     for i in 0..NUM_MATTERS {
         initial_matter_data.push(Matter {
             color: 0xffffffffu32,
+            lock: 0u32,
         });
     }
 
@@ -553,10 +555,12 @@ fn on_click_compute(
                                 result[index] = Matter {
                                     color: 0xc2b280ffu32 - 0x01010100u32 * 30
                                         + rng.gen_range(0..30) * 0x010101ffu32,
+                                    lock: 0u32,
                                 };
                             } else if mouse_btns.pressed(MouseButton::Right) {
                                 result[index] = Matter {
                                     color: 0xffffffffu32,
+                                    lock: 0u32,
                                 };
                             }
                         }

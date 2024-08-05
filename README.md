@@ -1,4 +1,7 @@
 I'm still learning wgpu with bevy, feel free to correct me xD.
+
+https://github.com/user-attachments/assets/8ab40fec-72c6-49a1-bb1e-f1cc6e1f88f5  
+
 ## How to run it
 <code>cargo run</code>  
 It's quite possible that it will behave differently on your computer due to different gpu and fps, I'm not using FixedUpdate

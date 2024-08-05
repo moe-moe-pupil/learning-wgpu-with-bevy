@@ -3,10 +3,16 @@ use bevy::{
     input::mouse::MouseWheel,
     prelude::*,
     render::{
-        extract_resource::{ExtractResource, ExtractResourcePlugin}, render_asset::{RenderAssetUsages, RenderAssets}, render_graph::{self, RenderGraph, RenderLabel}, render_resource::{
+        extract_resource::{ExtractResource, ExtractResourcePlugin},
+        render_asset::{RenderAssetUsages, RenderAssets},
+        render_graph::{self, RenderGraph, RenderLabel},
+        render_resource::{
             encase::{private::WriteInto, StorageBuffer},
             *,
-        }, renderer::{RenderContext, RenderDevice, RenderQueue}, texture::GpuImage, Render, RenderApp, RenderSet
+        },
+        renderer::{RenderContext, RenderDevice, RenderQueue},
+        texture::GpuImage,
+        Render, RenderApp, RenderSet,
     },
     utils::HashMap,
     window::{PrimaryWindow, WindowMode, WindowPlugin},
@@ -274,7 +280,7 @@ fn main() {
             Update,
             (
                 update_state,
-                (unmap_all, swap, copy_buffer, submit, map_all)
+                (unmap_all, copy_buffer, submit, map_all)
                     .chain()
                     .run_if(not(in_state::<BufferState>(BufferState::Working))),
                 is_poll,
@@ -374,26 +380,18 @@ fn setup(
     ));
 
     let mut initial_matter_data = Vec::with_capacity(NUM_MATTERS as usize);
-    let mut initial_fall_map = Vec::with_capacity(NUM_MATTERS as usize);
-    //FIXME use more readable code
+    //FIXME make code more readable
     for i in 0..NUM_MATTERS {
         initial_matter_data.push(Matter {
             color: 0xffffffffu32,
         });
-        initial_fall_map.push(Line {
-            prev_height: 0_u32,
-            height: 0_u32,
-            can_move: 0_u32,
-        })
     }
 
     let mut new_storage: GlobalStorage = GlobalStorage {
         buffers: HashMap::default(),
         stage_buffers: HashMap::default(),
     };
-    new_storage.add_buffer("matter_src", &initial_matter_data, render_device.as_ref());
     new_storage.add_buffer("matter_dst", &initial_matter_data, render_device.as_ref());
-    new_storage.add_buffer("can_fall_map", &initial_fall_map, render_device.as_ref());
     commands.insert_resource(RenderContextStorage {
         encoder: Some(
             render_device.create_command_encoder(&CommandEncoderDescriptor { label: None }),
@@ -455,14 +453,6 @@ fn copy_buffer(
     let matter_dst = &global_storage
         .stage_buffers
         .get("matter_dst")
-        .unwrap()
-        .buffer;
-    render_storage.copy_buffer(matter_src, matter_dst, matter_dst.size());
-
-    let matter_src = global_storage.buffers.get("matter_src").unwrap();
-    let matter_dst = &global_storage
-        .stage_buffers
-        .get("matter_src")
         .unwrap()
         .buffer;
     render_storage.copy_buffer(matter_src, matter_dst, matter_dst.size());
@@ -545,7 +535,7 @@ fn on_click_compute(
         }
 
         if mouse_btns.any_pressed([MouseButton::Left, MouseButton::Right]) {
-            let matter_dst = global_storage.stage_buffers.get("matter_src").unwrap();
+            let matter_dst = global_storage.stage_buffers.get("matter_dst").unwrap();
             let radius = brush.radius;
             let mut rng = rand::thread_rng();
             if matter_dst.mapped {
@@ -574,7 +564,7 @@ fn on_click_compute(
                 }
 
                 queue.write_buffer(
-                    global_storage.buffers.get("matter_src").unwrap(),
+                    global_storage.buffers.get("matter_dst").unwrap(),
                     0,
                     cast_slice(&result),
                 );
@@ -605,23 +595,7 @@ fn queue_bind_group(
                 binding: 1,
                 resource: storage
                     .buffers
-                    .get("matter_src")
-                    .unwrap()
-                    .as_entire_binding(),
-            },
-            BindGroupEntry {
-                binding: 2,
-                resource: storage
-                    .buffers
                     .get("matter_dst")
-                    .unwrap()
-                    .as_entire_binding(),
-            },
-            BindGroupEntry {
-                binding: 3,
-                resource: storage
-                    .buffers
-                    .get("can_fall_map")
                     .unwrap()
                     .as_entire_binding(),
             },
@@ -655,29 +629,9 @@ impl FromWorld for PixelSimulationPipeline {
                     binding: 1,
                     visibility: ShaderStages::COMPUTE,
                     ty: BindingType::Buffer {
-                        ty: BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: Some(Matter::min_size()),
-                    },
-                    count: None,
-                },
-                BindGroupLayoutEntry {
-                    binding: 2,
-                    visibility: ShaderStages::COMPUTE,
-                    ty: BindingType::Buffer {
                         ty: BufferBindingType::Storage { read_only: false },
                         has_dynamic_offset: false,
                         min_binding_size: Some(Matter::min_size()),
-                    },
-                    count: None,
-                },
-                BindGroupLayoutEntry {
-                    binding: 3,
-                    visibility: ShaderStages::COMPUTE,
-                    ty: BindingType::Buffer {
-                        ty: BufferBindingType::Storage { read_only: false },
-                        has_dynamic_offset: false,
-                        min_binding_size: Some(Line::min_size()),
                     },
                     count: None,
                 },

@@ -1,6 +1,7 @@
 use bevy::{
-    diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin},
+    diagnostic::FrameTimeDiagnosticsPlugin,
     input::mouse::MouseWheel,
+    platform::collections::HashMap,
     prelude::*,
     render::{
         extract_resource::{ExtractResource, ExtractResourcePlugin},
@@ -12,28 +13,17 @@ use bevy::{
         },
         renderer::{RenderContext, RenderDevice, RenderQueue},
         texture::GpuImage,
-        Render, RenderApp, RenderSet,
+        Render, RenderApp, RenderSystems,
     },
-    utils::HashMap,
     window::{PrimaryWindow, WindowMode, WindowPlugin},
 };
-use bevy_framepace::Limiter;
-use bevy_inspector_egui::prelude::*;
-use bevy_inspector_egui::quick::ResourceInspectorPlugin;
-use bevy_inspector_egui::quick::WorldInspectorPlugin;
-use bevy_pixel_camera::{PixelCameraPlugin, PixelViewport, PixelZoom};
+
 use bytemuck::Pod;
 use bytemuck::{cast_slice, Zeroable};
 use line_drawing;
 use rand::prelude::*;
-use std::{
-    any,
-    borrow::Cow,
-    cmp::{max, min},
-    num::NonZeroU64,
-    println,
-    time::SystemTime,
-};
+use std::borrow::Cow;
+use wgpu::PollStatus;
 #[derive(Debug, Hash, PartialEq, Eq, Clone, RenderLabel)]
 pub struct PixelSimulationLabel;
 const SIZE: (f32, f32) = (512.0, 512.0); // (512.0, 512.0);
@@ -72,19 +62,24 @@ pub struct StagingBuffer {
 
 impl RenderContextStorage {
     fn poll(&mut self) -> bool {
-        match self.device.wgpu_device().poll(wgpu::MaintainBase::Poll) {
+        match self.device.wgpu_device().poll(PollType::Poll) {
             // The first few times the poll occurs the queue will be empty, because wgpu hasn't started anything yet.
             // We need to wait until `MaintainResult::Ok`, which means wgpu has started to process our data.
             // Then, the next time the queue is empty (`MaintainResult::SubmissionQueueEmpty`), wgpu has finished processing the data and we are done.
-            wgpu::MaintainResult::SubmissionQueueEmpty => {
-                let res = self.submission_queue_processed;
-                self.submission_queue_processed = false;
-                res
-            }
-            wgpu::MaintainResult::Ok => {
+            Ok(result) => {
+                match result {
+                    PollStatus::QueueEmpty => {
+                        let res = self.submission_queue_processed;
+                        self.submission_queue_processed = false;
+                        return res;
+                    }
+                    PollStatus::WaitSucceeded => {}
+                    PollStatus::Poll => {}
+                };
                 self.submission_queue_processed = true;
                 false
             }
+            Err(_) => todo!(),
         }
     }
 
@@ -177,7 +172,7 @@ impl GlobalStorage {
         let [buffer_a, buffer_b] = self
             .buffers
             .get_many_mut(["matter_src", "matter_dst"])
-            .unwrap();
+            .map(|b| b.unwrap());
         std::mem::swap(buffer_a, buffer_b);
     }
 }
@@ -239,10 +234,9 @@ fn update_state(state: ResMut<State<BufferState>>, mut next_state: ResMut<NextSt
     }
 }
 
-#[derive(Reflect, Resource, Default, InspectorOptions)]
-#[reflect(Resource, InspectorOptions)]
+#[derive(Reflect, Resource, Default)]
+#[reflect(Resource)]
 struct Brush {
-    #[inspector(min = 0)]
     radius: i32,
 }
 
@@ -250,7 +244,6 @@ fn main() {
     //env_logger::init();
     App::new()
         .insert_resource(ClearColor(Color::BLACK))
-        .insert_resource(Msaa::Off)
         .add_plugins(
             DefaultPlugins
                 .set(WindowPlugin {
@@ -267,30 +260,25 @@ fn main() {
                 .set(ImagePlugin::default_nearest()),
         )
         .init_state::<BufferState>()
-        // .add_plugins(WorldInspectorPlugin::new())
-        .add_plugins(PixelCameraPlugin)
         .add_plugins((
             FrameTimeDiagnosticsPlugin::default(),
             PixelSimulationComputePlugin,
-            bevy_framepace::FramepacePlugin,
         ))
         .init_resource::<Brush>() // `ResourceInspectorPlugin` won't initialize the resource
         .register_type::<Brush>() // you need to register your type to display it
-        .add_plugins(ResourceInspectorPlugin::<Brush>::default())
-        .add_systems(Update, text_update_system)
         .add_systems(Startup, setup)
         .add_systems(
-            Update,
+            PreUpdate,
             (
                 update_state,
                 (unmap_all, copy_buffer, submit, map_all)
                     .chain()
                     .run_if(not(in_state::<BufferState>(BufferState::Working))),
                 is_poll,
-                on_click_compute,
             )
                 .chain(),
         )
+        .add_systems(FixedPostUpdate, on_click_compute)
         .run();
 }
 
@@ -314,9 +302,7 @@ fn setup(
     asset_server: Res<AssetServer>,
     render_device: Res<RenderDevice>,
     render_queue: Res<RenderQueue>,
-    mut settings: ResMut<bevy_framepace::FramepaceSettings>,
 ) {
-    settings.limiter = Limiter::from_framerate(300.0);
     let mut image = Image::new_fill(
         Extent3d {
             width: SIZE.0 as u32,
@@ -332,57 +318,18 @@ fn setup(
         TextureUsages::COPY_DST | TextureUsages::STORAGE_BINDING | TextureUsages::TEXTURE_BINDING;
     let image = images.add(image);
 
-    commands.spawn(SpriteBundle {
-        sprite: Sprite {
-            custom_size: Some(Vec2::new(SIZE.0 as f32, SIZE.1 as f32)),
-            ..default()
-        },
-        texture: image.clone(),
+    commands.spawn(Sprite {
+        image: image.clone(),
+        custom_size: Some(Vec2::new(SIZE.0 as f32, SIZE.1 as f32)),
         ..default()
     });
     commands.spawn((
-        Camera2dBundle::default(),
-        PixelZoom::FitSize {
-            width: SIZE.0 as i32,
-            height: SIZE.1 as i32,
-        },
-        PixelViewport,
+        Camera2d::default(),
     ));
 
     commands.insert_resource(PixelSimulationImage { texture: image });
 
     let font = asset_server.load::<Font>("fonts/NotoSansTC-Medium.otf");
-    commands.spawn((
-        TextBundle::from_sections([
-            TextSection::new(
-                "FPS: ".to_string(),
-                TextStyle {
-                    font: font.clone(),
-                    font_size: 40.0,
-                    color: Color::WHITE,
-                },
-            ),
-            TextSection::new(
-                "FPS: ".to_string(),
-                TextStyle {
-                    font: font.clone(),
-                    font_size: 40.0,
-                    color: Color::BLACK,
-                },
-            ),
-        ])
-        .with_text_justify(JustifyText::Left)
-        .with_style(Style {
-            position_type: PositionType::Absolute,
-            margin: UiRect {
-                left: Val::Px(50.0),
-                top: Val::Px(50.0),
-                ..default()
-            },
-            ..default()
-        }),
-        FpsText,
-    ));
 
     let mut initial_matter_data = Vec::with_capacity(NUM_MATTERS as usize);
     //FIXME make code more readable
@@ -426,7 +373,7 @@ impl Plugin for PixelSimulationComputePlugin {
         let render_app = app.sub_app_mut(RenderApp);
         render_app.add_systems(
             Render,
-            queue_bind_group.in_set(RenderSet::PrepareBindGroups),
+            queue_bind_group.in_set(RenderSystems::PrepareBindGroups),
         );
 
         let mut render_graph = render_app.world_mut().resource_mut::<RenderGraph>();
@@ -494,7 +441,7 @@ fn on_click_compute(
     mut scroll_evr: EventReader<MouseWheel>,
     brush: Res<Brush>,
 ) {
-    if let Some(position) = q_windows.single().cursor_position() {
+    if let Some(position) = q_windows.single().unwrap().cursor_position() {
         // if buttons.just_pressed(MouseButton::Right) {
         //     let matter_dst = global_storage.stage_buffers.get("matter_dst").unwrap();
         //     if matter_dst.mapped {
@@ -532,9 +479,9 @@ fn on_click_compute(
                 transform.translation.x += 0.5;
             }
         }
-        for mut transform in query.iter_mut() {
+        for transform in query.iter_mut() {
             world_pos = cursor_to_world(
-                &q_windows.single(),
+                &q_windows.single().unwrap(),
                 transform.translation.xy(),
                 transform.scale.x,
             );
@@ -542,8 +489,8 @@ fn on_click_compute(
 
         if mouse_btns.any_pressed([MouseButton::Left, MouseButton::Right]) {
             let matter_dst = global_storage.stage_buffers.get("matter_dst").unwrap();
-            let radius = brush.radius;
-            let mut rng = rand::thread_rng();
+            let radius = 15; // brush.radius;
+            let mut rng = rand::rng();
             if matter_dst.mapped {
                 let mut result =
                     cast_slice::<u8, Matter>(&matter_dst.buffer.slice(..).get_mapped_range())
@@ -558,7 +505,7 @@ fn on_click_compute(
                             if mouse_btns.pressed(MouseButton::Left) {
                                 result[index] = Matter {
                                     color: 0xc2b280ffu32 - 0x01010100u32 * 30
-                                        + rng.gen_range(0..30) * 0x010101ffu32,
+                                        + rng.random_range(0..30) * 0x010101ffu32,
                                     lock: 0u32,
                                 };
                             } else if mouse_btns.pressed(MouseButton::Right) {
@@ -655,7 +602,8 @@ impl FromWorld for PixelSimulationPipeline {
             push_constant_ranges: Vec::new(),
             shader: shader.clone(),
             shader_defs: vec![],
-            entry_point: Cow::from("main"),
+            entry_point: Some(Cow::from("main")),
+            zero_initialize_workgroup_memory: false,
         });
 
         PixelSimulationPipeline {
@@ -738,21 +686,5 @@ impl render_graph::Node for PixelSimulationNode {
         }
 
         Ok(())
-    }
-}
-
-#[derive(Component)]
-struct FpsText;
-
-fn text_update_system(
-    diagnostics: Res<DiagnosticsStore>,
-    mut query: Query<&mut Text, With<FpsText>>,
-) {
-    for mut text in &mut query {
-        if let Some(fps) = diagnostics.get(&FrameTimeDiagnosticsPlugin::FPS) {
-            if let Some(value) = fps.smoothed() {
-                text.sections[1].value = format!("{value:.2}");
-            }
-        }
     }
 }
